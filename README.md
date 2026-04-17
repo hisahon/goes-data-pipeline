@@ -1,25 +1,33 @@
-# GOES Data Pipeline
+# GOES Data Pipeline (CPTEC/INPE)
 
-Este repositório contém um pipeline automatizado em Python para o download, conversão e processamento de dados dos satélites **GOES-16** e **GOES-19**. O foco do projeto é a identificação de aglomerados convectivos utilizando dados infravermelhos (Canal 13).
+Este repositório contém um pipeline robusto e automatizado para o download e processamento de dados dos satélites **GOES-16** e **GOES-19**. O sistema foi projetado para facilitar a pesquisa meteorológica e ionosférica, focando na identificação de sistemas convectivos (MCS) através do Canal 13 (Infravermelho).
 
-## 🚀 Funcionalidades
+---
 
-* **Seleção Automática de Satélite**: O sistema alterna automaticamente entre GOES-16 e GOES-19 com base na data solicitada (transição em Abril de 2025).
-* **Download Multiprocessado**: Utiliza `ProcessPoolExecutor` para realizar downloads paralelos e otimizar o tempo de transferência.
-* **Conversão para NumPy**: Transforma arquivos NetCDF brutos em arquivos `.npz` compactados e otimizados para leitura rápida.
-* **Detecção de Clusters**: Implementa algoritmos de segmentação e detecção de aglomerados frios (DBSCAN/RegionProps).
-* **Recorte Espacial (Crop)**: Realiza o recorte automático dos dados para a região da América do Sul utilizando máscaras pré-definidas.
+## 🌟 Destaques do Projeto
 
-## 📂 Estrutura do Projeto
+* **Inteligência de Satélite**: Seleção automática entre GOES-16 (dados históricos até 03/2025) e GOES-19 (dados operacionais a partir de 04/2025).
+* **Alta Performance**: Download e conversão simultâneos utilizando múltiplos núcleos de processamento (`ProcessPoolExecutor`).
+* **Pipeline End-to-End**: O script realiza o download do NetCDF, aplica o recorte espacial (crop), converte para NumPy e deleta o arquivo bruto automaticamente para economizar espaço em disco.
+* **Compatibilidade Multiplataforma**: Caminhos de diretório inteligentes que se adaptam entre Windows e Linux (Servidor/Local).
 
-* `download.py`: Script principal para interface de linha de comando (CLI) e gerenciamento de tarefas de download.
-* `detector.py`: Módulo responsável pela leitura de arquivos NetCDF e detecção de sistemas convectivos.
-* `converter.py`: Utilitário para conversão e quantização de dados para o formato `.npz`.
-* `.gitignore`: Configuração para impedir o envio de dados pesados (`.nc`, `.npz`) para o GitHub.
+[Image of satellite data processing workflow from raw NetCDF to processed NumPy arrays]
 
-## 🛠️ Instalação
+---
 
-Certifique-se de ter o Python instalado e as seguintes dependências:
+## 📂 Arquitetura do Repositório
 
+| Arquivo | Função Principal |
+| :--- | :--- |
+| `download.py` | Interface de linha de comando e lógica de download paralelo. |
+| `detector.py` | Leitura de arquivos NetCDF e detecção de clusters (DBSCAN). |
+| `converter.py` | Conversão e compressão de arrays para formato `.npz`. |
+| `.gitignore` | Bloqueia o upload de arquivos binários pesados e temporários. |
+
+---
+
+## 🛠️ Requisitos de Sistema
+
+### Bibliotecas Python
 ```bash
 pip install numpy requests beautifulsoup4 tqdm xarray scipy scikit-image matplotlib cartopy
