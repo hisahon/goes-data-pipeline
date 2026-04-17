@@ -3,6 +3,7 @@
 *.npz
 download_goes_temporary/
 database_numpy/
+goes_temporary_raw/
 
 # Pastas de ambiente e cache
 __pycache__/

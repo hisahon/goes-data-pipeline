@@ -432,8 +432,8 @@ def defining_folders(server_ON: bool) -> dict:
     """
     if os.name == "nt":
         # Windows workstation.
-        FOLDER_ROOT = Path("D:/banco_dados/cptec/database_numpy")
-        FOLDER_GOES_TEMPORARY = Path("D:/banco_dados/cptec/goes_temporary_raw")
+        FOLDER_ROOT = Path("database_numpy")
+        FOLDER_GOES_TEMPORARY = Path("goes_temporary_raw")
     elif os.name == "posix":
         if server_ON:
             # Remote/headless server: write under $HOME.
