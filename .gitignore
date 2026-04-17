@@ -1,4 +1,11 @@
+# Arquivos de dados (não devem ser sincronizados)
 *.nc
 *.npz
+download_goes_temporary/
+database_numpy/
+
+# Pastas de ambiente e cache
 __pycache__/
-download_goes_temporary
+.env
+.spyproject/
+venv/
