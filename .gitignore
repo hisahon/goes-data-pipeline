@@ -1,0 +1,4 @@
+*.nc
+*.npz
+__pycache__/
+download_goes_temporary
