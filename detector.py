@@ -252,7 +252,7 @@ def region_mask_top_bottom(lats, lons, inclusive=True):
     return ((L <= Ytop) & (L >= Ybot)) if inclusive else ((L < Ytop) & (L > Ybot))
 
 
-def detect_clusters_area5(f, temp, OPTIONS, fp, lats=None, lons=None, plot=True):
+def detect_clusters_area(f, temp, OPTIONS, fp, lats=None, lons=None, plot=True):
 
     t_threshold = OPTIONS['region_temperature_threshold']
     tmin_threshold = OPTIONS['min_temperature_threshold']
@@ -463,7 +463,7 @@ def read_npz_goes(file_path):
     return temp, lats, lons
 
 if __name__ == "__main__":
-    file_path = Path("paper/ch13/2021/10/S10635346_202110231700.nc")
+    file_path = Path("paper/ch13/2021/10/S10635346_202110231700.nc") #CPTEC file
     
     temp, lats, lons = read_goes_file(file_path)
     
