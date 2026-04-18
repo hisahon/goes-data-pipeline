@@ -23,8 +23,8 @@ Pipeline automatizado para **download**, **conversão** e **detecção de sistem
 | `download.py` | Orquestrador do download. CLI, lista arquivos do CPTEC, escolhe GOES-16/19 e dispara workers paralelos. |
 | `converter.py` | Conversão NetCDF → `.npz` (int16 comprimido). Helpers de timestamp e de destino. |
 | `detector.py` | Detecção de clusters convectivos (connected components via `skimage.label` + filtros de área/temperatura), leitura de `.nc`/`.npz`, plotagem com Cartopy. |
-| `visual1.py` | Pipeline principal de detecção sobre o banco `.npz`. Três backends: serial, multiprocessing, MPI. |
-| `visual_terminal.py` | Wrapper CLI fino sobre `visual1.main` (flags `--server`, `--parallel`, `--mpi`, `-w`, `-o`). |
+| `visual.py` | Pipeline principal de detecção sobre o banco `.npz`. Três backends: serial, multiprocessing, MPI. |
+| `visual_terminal.py` | Wrapper CLI fino sobre `visual.main` (flags `--server`, `--parallel`, `--mpi`, `-w`, `-o`). |
 | `mask_SouthAmerica.npz` | Pré-computado: coordenadas, `extent` e máscara booleana da América do Sul. |
 | `.gitignore` | Bloqueia binários pesados (`.nc`, `.npz` grandes, figuras, caches). |
 
@@ -58,8 +58,8 @@ flowchart LR
     A[CPTEC FTP<br/>goes16 / goes19] -->|download.py| B[.nc bruto<br/>temporário]
     B -->|read_goes_file + crop| C[.npz comprimido<br/>int16]
     B -->|auto delete| X[remove]
-    C -->|visual1.py<br/>detect_clusters_area6| D[report CSV<br/>por frame]
-    C -->|visual1.py<br/>plot Cartopy| E[figura PNG<br/>opcional]
+    C -->|visual.py<br/>detect_clusters_area6| D[report CSV<br/>por frame]
+    C -->|visual.py<br/>plot Cartopy| E[figura PNG<br/>opcional]
     C -->|sem cluster + delete_noCloud_file| X
 ```
 
@@ -115,7 +115,7 @@ Flags:
 
 ## ⚙️ Parâmetros de Detecção
 
-Editáveis no dicionário `OPTIONS` dentro de `visual1.main`:
+Editáveis no dicionário `OPTIONS` dentro de `visual.main`:
 
 | Chave | Significado | Valor típico |
 | :--- | :--- | :--- |
@@ -153,7 +153,7 @@ Cada relatório contém uma linha por cluster com as colunas `centroid_lat, cent
 
 ## 🗂️ Layout de Pastas por Ambiente
 
-Selecionado automaticamente em `defining_folders` (`download.py`) e no início de `visual1.main`:
+Selecionado automaticamente em `defining_folders` (`download.py`) e no início de `visual.main`:
 
 | Ambiente | Detecção | Raiz do banco |
 | :--- | :--- | :--- |
