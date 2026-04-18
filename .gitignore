@@ -3,6 +3,8 @@
 *.npz
 download_goes_temporary/
 database_numpy/
+reports/
+figures/
 goes_temporary_raw/
 
 # Pastas de ambiente e cache
