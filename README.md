@@ -1,6 +1,6 @@
 # GOES Data Pipeline (CPTEC/INPE)
 
-Pipeline automatizado para **download**, **conversão**, **detecção** e **rastreamento temporal** de sistemas convectivos (MCS) em dados dos satélites **GOES-16** e **GOES-19**, servidos pelo CPTEC/INPE. Focado no **Canal 13 (infravermelho, ~10.3 µm)** e em análise sobre a América do Sul.
+Pipeline automatizado para **download**, **conversão**, **detecção**, **agregação** e **rastreamento temporal** de sistemas convectivos (MCS) em dados dos satélites **GOES-16** e **GOES-19**, servidos pelo CPTEC/INPE. Focado no **Canal 13 (infravermelho, ~10.3 µm)** e em análise sobre a América do Sul.
 
 ---
 
@@ -11,8 +11,10 @@ Pipeline automatizado para **download**, **conversão**, **detecção** e **rast
 - **Pipeline end-to-end** — baixa o NetCDF, aplica recorte espacial, converte para `.npz` comprimido (int16, ~5-10× menor) e apaga o bruto.
 - **Três backends de processamento** — serial (debug), multiprocessing (padrão) e MPI dinâmico master/worker (cluster / multi-nó).
 - **Detecção de clusters frios** — smoothing gaussiano, máscara geográfica da América do Sul, filtragem por área mínima e temperatura mínima, com geração opcional de relatório CSV + figura Cartopy.
+- **Agregação e exploração** — varre a árvore de `reports/*.txt`, monta o parquet agregado, reduz para um cluster por timestamp e segmenta a série em runs contínuos, com plots DOY × hora UTC para análise sazonal e de ciclo diurno.
 - **Rastreamento temporal** — conecta detecções frame-a-frame em trajetórias de MCS com `haversine` vetorizada e atribuição gulosa ou Hungarian, produzindo parquet + sumário CSV + mapas anuais.
-- **Idempotente** — reexecuções pulam automaticamente arquivos já processados (`.npz` existente, relatório presente ou parquet de tracks presente).
+- **Três interfaces por estágio** — módulo Python importável, CLI fina com `argparse` e script Spyder com células `#%%`.
+- **Idempotente** — reexecuções pulam automaticamente arquivos já processados (`.npz` existente, relatório presente, parquet agregado presente ou parquet de tracks presente).
 - **Multiplataforma** — layout de pastas ajustado para Windows, workstation Linux local (via sshfs) e servidor Linux headless.
 
 ---
@@ -26,8 +28,12 @@ Pipeline automatizado para **download**, **conversão**, **detecção** e **rast
 | `detector.py` | Detecção de clusters convectivos (connected components via `skimage.label` + filtros de área/temperatura), leitura de `.nc`/`.npz`, plotagem com Cartopy. |
 | `visual.py` | Pipeline principal de detecção sobre o banco `.npz`. Três backends: serial, multiprocessing, MPI. |
 | `visual_terminal.py` | Wrapper CLI fino sobre `visual.main` (flags `--server`, `--parallel`, `--mpi`, `-w`, `-o`). |
+| `aggregator.py` | Agregação `reports/*.txt` → parquet, desempate por timestamp, segmentação em runs contínuos, plots DOY × hora. |
+| `aggregator_terminal.py` | Wrapper CLI com subcomandos `aggregate`, `unique`, `plot-runs`, `plot-multi`. |
+| `aggregator_spyder.py` | Script Spyder com células `#%%` para exploração interativa dos reports agregados. |
 | `tracker.py` | Rastreamento temporal de clusters (haversine vetorizada, atribuição gulosa ou Hungarian, plot anual com Cartopy). |
 | `tracker_terminal.py` | Wrapper CLI fino sobre `tracker.track_centroids` (flags `--input`, `--output`, `--min-area`, `--max-km`, `--assignment`, `--bbox`, `--plot`). |
+| `tracker_spyder.py` | Script Spyder com células `#%%` para tracking e inspeção de trilhas individuais. |
 | `mask_SouthAmerica.npz` | Pré-computado: coordenadas, `extent` e máscara booleana da América do Sul. |
 | `.gitignore` | Bloqueia binários pesados (`.nc`, `.npz` grandes, figuras, caches). |
 
@@ -66,12 +72,14 @@ flowchart LR
     B -->|auto delete| X[remove]
     C -->|visual.py<br/>detect_clusters_area6| D[report CSV<br/>por frame]
     C -->|sem cluster + delete_noCloud_file| X
-    D -->|aggregate parquet| F[parquet agregado<br/>detecções]
-    F -->|tracker.py<br/>track_centroids| G[parquet tracked<br/>+ summary.csv]
+    D -->|aggregator.py<br/>reports2df| F[parquet agregado<br/>todas as detecções]
+    F -->|make_unique_by_time| U[parquet único<br/>1 cluster / timestamp]
+    U -->|filter_continuous_runs<br/>+ plot_runs_by_year| R[PNG DOY × hora<br/>por ano]
+    U -->|tracker.py<br/>track_centroids| G[parquet tracked<br/>+ summary.csv]
     G -->|plot_all_years| H[PNG anual<br/>SA_tracked_AAAA.png]
 ```
 
-Em uma frase: **cada arquivo do CPTEC vira um `.npz` regional, que vira um relatório (e opcionalmente uma figura) quando contém um cluster frio; o conjunto dos relatórios é agregado em um parquet e o tracker conecta as detecções ao longo do tempo em trajetórias de MCS.**
+Em uma frase: **cada arquivo do CPTEC vira um `.npz` regional, que vira um relatório quando contém um cluster frio; o conjunto dos relatórios é agregado e pode seguir por dois caminhos — análise exploratória DOY × hora ou rastreamento temporal das trajetórias de MCS.**
 
 ---
 
@@ -119,14 +127,60 @@ Flags:
 | `-w`, `--workers` | Workers do backend paralelo. |
 | `-o`, `--output_key` | Sufixo adicionado a `figures/` e `reports/` (útil para rodar vários parâmetros lado a lado). |
 
-### 3. Rastreamento de trajetórias (`tracker_terminal.py`)
+### 3. Agregação e análise exploratória (`aggregator_terminal.py`)
 
-Consome o parquet agregado das detecções (resultado dos `reports/*.txt` concatenados) e produz (i) um parquet com `track_id` atribuído, (ii) um `*_summary.csv` com início/fim de cada trilha e (iii) opcionalmente mapas anuais com início (azul) e fim (vermelho) de cada trajetória.
+Junta todos os `reports/*.txt` em um parquet, reduz a um cluster por timestamp (maior área), segmenta a série em runs contínuos e gera plots DOY × hora UTC para análise de sazonalidade e ciclo diurno. Tem quatro subcomandos:
+
+```bash
+# 3a. Varre a árvore de reports e gera o parquet agregado
+python aggregator_terminal.py aggregate --server \
+    --reports-dir reports_S \
+    --output merged/c13_2018-2025.parquet
+
+# 3b. Reduz para um cluster por timestamp (maior area_km2)
+python aggregator_terminal.py unique \
+    --input  merged/c13_2018-2025.parquet \
+    --output merged/c13_2018-2025u.parquet
+
+# 3c. PNG anual DOY × hora com runs contínuos coloridos ciclicamente
+python aggregator_terminal.py plot-runs \
+    --input  merged/c13_2018-2025u.parquet \
+    --out-dir results --min-hours 16 --gap-minutes 30 \
+    --area-label "Area > 200k km²"
+
+# 3d. Overlay dos timestamps com 2+ clusters simultâneos (usa parquet bruto)
+python aggregator_terminal.py plot-multi \
+    --input  merged/c13_2018-2025.parquet \
+    --output results/doy_hour_multicluster.png
+```
+
+Flags globais:
+
+| Flag | Descrição |
+| :--- | :--- |
+| `--server` | Layout de pastas do servidor. |
+| `-v`, `--verbose` | Verbosidade (`-v`, `-vv`). |
+
+Flags do `plot-runs` (as mais usadas):
+
+| Flag | Descrição | Default |
+| :--- | :--- | :--- |
+| `--min-hours` | Duração mínima do run (h). | `16` |
+| `--gap-minutes` | Gap máximo dentro de um run (min). | `30` |
+| `--area-label` | Texto à direita do título. | `Area > 200k km²` |
+| `--prefix` | Prefixo do nome do PNG. | `doy_hour_runs` |
+| `--palette` | Colormap cíclico do matplotlib. | `tab10` |
+| `--n-colors` | Nº de cores no ciclo. | `10` |
+| `--dpi` | DPI de saída. | `300` |
+
+### 4. Rastreamento de trajetórias (`tracker_terminal.py`)
+
+Consome o parquet agregado das detecções (normalmente a saída do `aggregate` acima) e produz (i) um parquet com `track_id` atribuído, (ii) um `*_summary.csv` com início/fim de cada trilha e (iii) opcionalmente mapas anuais com início (azul) e fim (vermelho) de cada trajetória.
 
 ```bash
 # Pipeline completo: tracking + sumário + mapas por ano
 python tracker_terminal.py --server \
-    --input database_numpy/c13_2018-2025_SouthAmerica.parquet \
+    --input merged/c13_2018-2025.parquet \
     --output tracks/c13_2018-2025_SA_Tracked.parquet \
     --min-area 600000 --max-km 35 --min-points 60 \
     --assignment hungarian \
@@ -153,9 +207,23 @@ Flags:
 | `--min-area` | Filtra detecções com `area_km2 >= MIN_AREA`. | off |
 | `--bbox` | `LAT_MIN LAT_MAX LON_MIN LON_MAX` para recorte. | off |
 | `--plot` | Gera um PNG por ano com as trajetórias. | off |
+| `--output-prefix` | Prefixo do parquet de saída default. | `c13_tracked` |
+| `--plot-prefix` | Prefixo dos PNGs anuais gerados com `--plot`. | `SA_tracked` |
 | `-o`, `--output_key` | Sufixo para as pastas de saída. | `""` |
 | `--server` | Layout de pastas do servidor. | off |
 | `-v`, `--verbose` | Verbosidade do logging (`-v`, `-vv`). | off |
+
+### Interfaces Spyder
+
+Cada estágio a partir da agregação tem um script companheiro para uso interativo no Spyder IDE, com células `#%%` e um bloco de configuração único no topo:
+
+```bash
+# Abra no Spyder e rode Ctrl+Enter célula por célula
+aggregator_spyder.py     # agregação + análise exploratória
+tracker_spyder.py        # tracking + inspeção de trilhas individuais
+```
+
+Estrutura comum: célula `[0]` tem todos os caminhos e parâmetros, célula `[1]` faz imports e setup de logging, as demais executam o pipeline de forma idempotente (se o parquet de saída existir, é carregado em vez de recalculado).
 
 ---
 
@@ -171,6 +239,17 @@ Editáveis no dicionário `OPTIONS` dentro de `visual.main`:
 | `smooth_sigma` | Raio do filtro gaussiano (pixels) | `20.0` |
 | `delete_noCloud_file` | Apaga `.npz` sem cluster para liberar espaço | `True` |
 | `extent` | `[lon_min, lon_max, lat_min, lat_max]` | vindo do `mask_SouthAmerica.npz` |
+
+### Parâmetros de Agregação
+
+Editáveis via CLI (`aggregator_terminal.py`) ou como argumentos de função em `aggregator.py`:
+
+| Chave | Significado | Valor típico |
+| :--- | :--- | :--- |
+| `size_col` | Coluna usada para escolher o "vencedor" em `make_unique_by_time`. | `area_km2` |
+| `min_hours` | Duração mínima (h) de um run contínuo. | `16` |
+| `gap_minutes` | Gap máximo (min) dentro de um run. | `30` |
+| `palette` / `n_colors` | Colormap cíclico usado para colorir `run_id`s no plot. | `tab10` / `10` |
 
 ### Parâmetros de Tracking
 
@@ -198,17 +277,26 @@ database_numpy/
 
 figures/
 └── 2021/
-    └── 296/                              # dia-do-ano (DOY)
+    └── 296/                               # dia-do-ano (DOY)
         └── C13_2021-296_1700.png
 
 reports/
 └── 2021/
     └── 296/
-        └── C13_2021-296_1700.txt         # CSV por cluster detectado
+        └── C13_2021-296_1700.txt          # CSV por cluster detectado
+
+merged/
+├── c13_2018-2025.parquet                   # agregado de todos os reports
+└── c13_2018-2025u.parquet                  # um cluster por timestamp
+
+figures_runs/
+├── doy_hour_runs_2018.png                  # DOY × hora, runs coloridos
+├── doy_hour_runs_2019.png
+└── doy_hour_multicluster.png               # overlay de timestamps multicluster
 
 tracks/
-├── c13_2018-2025_SA_Tracked.parquet       # detecções + track_id
-└── c13_2018-2025_SA_Tracked_summary.csv   # uma linha por trilha
+├── c13_2018-2025_SA_Tracked.parquet        # detecções + track_id
+└── c13_2018-2025_SA_Tracked_summary.csv    # uma linha por trilha
 
 figures_tracks/
 └── tracked/
@@ -223,7 +311,7 @@ Cada relatório de detecção contém uma linha por cluster com as colunas `cent
 
 ## 🗂️ Layout de Pastas por Ambiente
 
-Selecionado automaticamente em `defining_folders` (`download.py`, `tracker_terminal.py`) e no início de `visual.main`:
+Selecionado automaticamente em `defining_folders` (`download.py`, `aggregator_terminal.py`, `tracker_terminal.py`) e no início de `visual.main`:
 
 | Ambiente | Detecção | Raiz do banco |
 | :--- | :--- | :--- |
@@ -243,9 +331,10 @@ sshfs hisashi@150.163.46.4:/home/hisashi/database/cptec ~/cptec \
 ## 📝 Notas
 
 - O corte GOES-16 / GOES-19 está codificado em `_SATELLITE_CUTOFF_YYYYMM = 202504` (`download.py`). Se o CPTEC alterar a data, edite essa única constante.
-- Reexecuções são seguras: `.npz` já presente = download pulado; `report` já presente = detecção pulada; `tracks/*.parquet` já presente = tracking pulado. Use `--force` no `tracker_terminal.py` para recalcular.
+- Reexecuções são seguras: `.npz` já presente = download pulado; `report` já presente = detecção pulada; `merged/*.parquet` já presente = agregação pulada; `tracks/*.parquet` já presente = tracking pulado. Use `--force` nos terminais `aggregator` e `tracker` para recalcular.
 - `.npz` são salvos em `int16` com fator de escala `×100` (centésimos de °C). A leitura em `read_npz_goes` já divide por 100 automaticamente.
 - Em erros de leitura o `.npz` é deletado (considerado corrompido). Em ambiente de produção, ajuste esse comportamento em `process_file_parallel` se quiser uma pasta de quarentena em vez de deleção.
 - O backend MPI depende de `mpi4py`; rode com `mpirun`/`mpiexec`.
 - O `tracker.py` é vetorizado frame-a-frame: em cada timestamp, calcula a matriz `haversine` entre detecções e trilhas ativas de uma só vez. Evite loops `iterrows` ao estender.
 - Blacklists manuais de `track_id` **não são reprodutíveis** (os IDs mudam a cada execução). Se alguma trilha precisa ser removida, prefira critérios objetivos (`min_points`, `max_speed_kmh`, `min_area_km2`) que sobrevivem a uma reexecução.
+- Para inspecionar o multicluster (timestamps com 2+ clusters simultâneos), use o **parquet agregado bruto**, não o `*u.parquet`: o estágio `unique` por definição só mantém um cluster por timestamp.

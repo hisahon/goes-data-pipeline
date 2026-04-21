@@ -411,15 +411,22 @@ def plot_all_years(
     df_tracked: pd.DataFrame,
     out_dir: str | Path,
     years: Iterable[int] | None = None,
+    filename_prefix: str = "SA_tracked",
     **kwargs,
 ) -> list[Path]:
-    """Gera um PNG por ano em ``out_dir/SA_tracked_<YEAR>.png``."""
+    """Gera um PNG por ano em ``out_dir/<filename_prefix>_<YEAR>.png``.
+
+    Parameters
+    ----------
+    filename_prefix
+        Prefixo do nome do arquivo. Default: ``"SA_tracked"``.
+    """
     out_dir = Path(out_dir)
     if years is None:
         years = sorted(pd.to_datetime(df_tracked["datetime"]).dt.year.dropna().unique())
     paths = []
     for y in years:
         paths.append(plot_yearly_tracks(
-            df_tracked, int(y), out_dir / f"SA_tracked_{int(y)}.png", **kwargs,
+            df_tracked, int(y), out_dir / f"{filename_prefix}_{int(y)}.png", **kwargs,
         ))
     return paths

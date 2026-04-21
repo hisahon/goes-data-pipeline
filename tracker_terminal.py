@@ -74,7 +74,7 @@ def run(args: argparse.Namespace) -> int:
 
     # --- resolve caminho de saída com output_key opcional ---
     out_path = Path(args.output) if args.output else (
-        folders["tracks"] / f"c13_tracked{args.output_key}.parquet"
+        folders["tracks"] / f"{args.output_prefix}{args.output_key}.parquet"
     )
 
     # --- Caminho 1: apenas replotar de um parquet tracked pronto ---
@@ -125,7 +125,10 @@ def run(args: argparse.Namespace) -> int:
         if args.bbox:
             lat_min, lat_max, lon_min, lon_max = args.bbox
             extent = (lon_min, lon_max, lat_min, lat_max)
-        paths = plot_all_years(df_tracked, fig_dir, extent=extent)
+        paths = plot_all_years(
+            df_tracked, fig_dir, extent=extent,
+            filename_prefix=args.plot_prefix,
+        )
         logger.info("%d mapas gerados em %s", len(paths), fig_dir)
 
     return 0
@@ -149,6 +152,14 @@ def build_parser() -> argparse.ArgumentParser:
                          "(útil apenas para replotar).")
     io.add_argument("-o", "--output_key", type=str, default="",
                     help="Sufixo acrescentado às pastas de saída.")
+    io.add_argument("--output-prefix", dest="output_prefix", type=str,
+                    default="c13_tracked",
+                    help="Prefixo do parquet de saída quando --output não é informado. "
+                         "Default: c13_tracked.")
+    io.add_argument("--plot-prefix", dest="plot_prefix", type=str,
+                    default="SA_tracked",
+                    help="Prefixo dos PNGs anuais gerados com --plot. "
+                         "Default: SA_tracked.")
     io.add_argument("--server", action="store_true",
                     help="Usa layout de pastas do servidor.")
     io.add_argument("--force", action="store_true",
