@@ -5,8 +5,10 @@ download_goes_temporary/
 database_numpy/
 reports/
 figures/
+merged/
 maps/
 reports/
+results/
 goes_temporary_raw/
 
 # Pastas de ambiente e cache

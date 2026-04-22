@@ -17,15 +17,15 @@ Autor: Rogério Hisashi Honda <hisashi.brase@gmail.com>
 from pathlib import Path
 
 # --- Caminhos ---
-INPUT_PARQUET  = Path("merged/c13_2018-2025_SouthAmerica.parquet")
-OUTPUT_PARQUET = Path("merged/c13_2018-2025_SA_Tracked.parquet")
-OUTPUT_SUMMARY = OUTPUT_PARQUET.with_name(OUTPUT_PARQUET.stem + "_summary.csv")
-FIGURES_DIR    = Path("figures_tracks")
+INPUT_PARQUET  = Path("merged/2962021.parquet")
+TRACKED_PARQUET = Path("merged/2962021u.parquet")
+OUTPUT_SUMMARY = TRACKED_PARQUET.with_name(TRACKED_PARQUET.stem + "_summary.csv")
+FIGURES_DIR    = Path("figures")
 
 # --- Filtros aplicados ANTES do tracking ---
-MIN_AREA_KM2 = 600_000      # None para desativar
-LAT_MIN, LAT_MAX = -40, -12 # None, None para sem recorte
-LON_MIN, LON_MAX = -67, -42 # None, None para sem recorte
+MIN_AREA_KM2 = None      # None para desativar
+LAT_MIN, LAT_MAX = -50, -15 # None, None para sem recorte
+LON_MIN, LON_MAX = -65, -30 # None, None para sem recorte
 
 # --- Parâmetros do tracking ---
 MAX_TIME_GAP   = "20min"    # tolerância entre frames consecutivos
@@ -109,17 +109,17 @@ opts = TrackerOptions(
     bbox           = bbox,
 )
 
-if OUTPUT_PARQUET.exists():
+if TRACKED_PARQUET.exists():
     log.info("Parquet tracked encontrado — carregando (apague para recalcular).")
-    df_tracked = pd.read_parquet(OUTPUT_PARQUET)
+    df_tracked = pd.read_parquet(TRACKED_PARQUET)
     df_tracked["datetime"] = pd.to_datetime(df_tracked["datetime"])
 else:
     log.info("Rodando tracking com opções:\n  %s", opts)
     df_tracked = track_centroids(df_raw, opts)
 
-    OUTPUT_PARQUET.parent.mkdir(parents=True, exist_ok=True)
-    df_tracked.to_parquet(OUTPUT_PARQUET, index=False)
-    log.info("Salvo: %s", OUTPUT_PARQUET)
+    # OUTPUT_PARQUET.parent.mkdir(parents=True, exist_ok=True)
+    # df_tracked.to_parquet(OUTPUT_PARQUET, index=False)
+    # log.info("Salvo: %s", OUTPUT_PARQUET)
 
 log.info(
     "Tracking pronto: %d detecções | %d trilhas",
@@ -150,47 +150,137 @@ print(f"{'='*50}\n")
 print(df_summary.describe().round(2))
 
 
-# %% [5]  DISTRIBUIÇÃO DE DURAÇÃO  (diagnóstico rápido)
+# %% [5]  DIAGNÓSTICOS DE TRILHAS  (por track_id)
 # =============================================================================
+# Três painéis:
+#   (a) Distribuição de duração (h)        — uma entrada por track_id
+#   (b) Distribuição de nº de detecções    — uma entrada por track_id
+#   (c) Concorrência temporal              — quantos tracks coexistem
 
-fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
 
 axes[0].hist(df_summary["duration_h"], bins=40, edgecolor="white", linewidth=0.4)
 axes[0].set_xlabel("Duração (h)")
-axes[0].set_ylabel("Contagem")
-axes[0].set_title("Distribuição de duração das trilhas")
+axes[0].set_ylabel("Nº de trilhas")
+axes[0].set_title("Duração por track_id")
 
 axes[1].hist(df_summary["n_points"], bins=40, edgecolor="white", linewidth=0.4)
-axes[1].set_xlabel("Número de detecções")
-axes[1].set_ylabel("Contagem")
-axes[1].set_title("Distribuição de tamanho das trilhas")
+axes[1].set_xlabel("Nº de detecções")
+axes[1].set_ylabel("Nº de trilhas")
+axes[1].set_title("Tamanho por track_id")
+
+# Concorrência: nº de track_ids distintos ativos em cada timestamp
+concurrent = df_tracked.groupby("datetime")["track_id"].nunique()
+max_conc = int(concurrent.max())
+axes[2].hist(
+    concurrent.values,
+    bins=np.arange(max_conc + 2) - 0.5,
+    edgecolor="white", linewidth=0.4,
+)
+axes[2].set_xticks(range(1, max_conc + 1))
+axes[2].set_xlabel("Nº de tracks simultâneos")
+axes[2].set_ylabel("Nº de timestamps")
+axes[2].set_title(f"Concorrência temporal (máx = {max_conc})")
+
+fig.tight_layout()
+plt.show()
+
+# Stats rápidas
+print(f"Total de trilhas          : {len(df_summary)}")
+print(f"Timestamps c/ >1 sistema  : {(concurrent > 1).sum()} "
+      f"({100 * (concurrent > 1).mean():.1f}%)")
+print(f"Máx. sistemas simultâneos : {max_conc}")
+
+
+# %% [6]  PANORAMA DAS TOP-N TRILHAS  (trajetórias + Gantt temporal)
+# =============================================================================
+# Plota as TOP_N trilhas mais longas todas no mesmo mapa, cada uma com uma
+# cor distinta, ao lado de um Gantt mostrando quais se sobrepõem no tempo.
+# Substitui a inspeção de 1 trilha única do pipeline antigo.
+
+TOP_N = 15
+
+top_ids = (
+    df_summary.sort_values("duration_h", ascending=False)
+              .head(TOP_N)["track_id"]
+              .tolist()
+)
+print(f"Top {TOP_N} trilhas por duração: {top_ids}")
+
+cmap = plt.get_cmap("tab10")
+fig, (ax_map, ax_gantt) = plt.subplots(
+    1, 2, figsize=(13, 5),
+    gridspec_kw={"width_ratios": [1.2, 1]},
+)
+
+# (a) Trajetórias sobrepostas
+for i, tid in enumerate(top_ids):
+    grp = df_tracked[df_tracked["track_id"] == tid].sort_values("datetime")
+    color = cmap(i % 10)
+    dur_h = (grp["datetime"].iloc[-1] - grp["datetime"].iloc[0]).total_seconds() / 3600
+    label = f"#{tid}  ({dur_h:.1f} h, {len(grp)} pts)"
+
+    ax_map.plot(
+        grp["centroid_lon"], grp["centroid_lat"],
+        "-o", markersize=3, lw=0.8, alpha=0.8, color=color, label=label,
+    )
+    ax_map.scatter(
+        grp["centroid_lon"].iloc[0], grp["centroid_lat"].iloc[0],
+        s=70, marker="^", facecolor=color, edgecolor="black", zorder=5,
+    )
+    ax_map.scatter(
+        grp["centroid_lon"].iloc[-1], grp["centroid_lat"].iloc[-1],
+        s=70, marker="s", facecolor=color, edgecolor="black", zorder=5,
+    )
+
+ax_map.set_xlabel("Longitude (°)")
+ax_map.set_ylabel("Latitude (°)")
+ax_map.set_title(f"Top {TOP_N} trilhas — trajetórias (▲ início, ■ fim)")
+ax_map.legend(fontsize=8, loc="best")
+ax_map.grid(True, linestyle=":", linewidth=0.5)
+
+# (b) Gantt: janela temporal de cada trilha (linhas horizontais grossas)
+for i, tid in enumerate(top_ids):
+    grp = df_tracked[df_tracked["track_id"] == tid]
+    t0, t1 = grp["datetime"].min(), grp["datetime"].max()
+    ax_gantt.plot(
+        [t0, t1], [i, i],
+        lw=10, color=cmap(i % 10), alpha=0.85, solid_capstyle="butt",
+    )
+
+ax_gantt.set_yticks(range(len(top_ids)))
+ax_gantt.set_yticklabels([f"#{tid}" for tid in top_ids])
+ax_gantt.invert_yaxis()
+ax_gantt.set_xlabel("Tempo")
+ax_gantt.set_title("Janela temporal (sobreposições = coexistência)")
+ax_gantt.grid(True, axis="x", linestyle=":", linewidth=0.5)
+fig.autofmt_xdate()
 
 fig.tight_layout()
 plt.show()
 
 
-# %% [6]  INSPECIONAR UMA TRILHA ESPECÍFICA
+# %% [6b]  INSPECIONAR UMA TRILHA ESPECÍFICA  (versão original, para zoom)
 # =============================================================================
-#
-# Mude TRACK_ID para qualquer track_id que queira examinar.
-# Use df_summary no Variable Explorer para escolher um interessante.
+# Use quando quiser examinar em detalhe uma trilha específica (trajetória
+# colorida pela ordem temporal). Escolha o ID pelo df_summary no Variable
+# Explorer ou use a maior do TOP_N.
 
-TRACK_ID = int(df_summary.sort_values("duration_h", ascending=False).iloc[0]["track_id"])
+TRACK_ID = top_ids[0]   # ou: int(df_summary.iloc[idx]["track_id"])
 
 grp = df_tracked[df_tracked["track_id"] == TRACK_ID].sort_values("datetime")
 print(f"\nTrilha {TRACK_ID}:")
 print(grp[["datetime", "centroid_lat", "centroid_lon", "area_km2"]].to_string(index=False))
 
-# Plot simples da trajetória no Spyder (sem Cartopy)
 fig, ax = plt.subplots(figsize=(6, 5))
 sc = ax.scatter(
     grp["centroid_lon"], grp["centroid_lat"],
     c=np.arange(len(grp)), cmap="plasma", s=15, zorder=3,
 )
 ax.plot(grp["centroid_lon"], grp["centroid_lat"], "-", lw=0.8, alpha=0.5)
-ax.scatter(*grp[["centroid_lon","centroid_lat"]].iloc[0],
+ax.scatter(grp["centroid_lon"].iloc[0], grp["centroid_lat"].iloc[0],
            s=60, marker="^", color="blue", zorder=5, label="Início")
-ax.scatter(*grp[["centroid_lon","centroid_lat"]].iloc[-1],
+ax.scatter(grp["centroid_lon"].iloc[-1], grp["centroid_lat"].iloc[-1],
            s=60, marker="s", color="red",  zorder=5, label="Fim")
 plt.colorbar(sc, ax=ax, label="Frame (ordem temporal)")
 ax.set_xlabel("Longitude (°)")
@@ -201,72 +291,3 @@ ax.set_title(f"Trilha {TRACK_ID}  |  {t0} → {t1}")
 ax.legend()
 fig.tight_layout()
 plt.show()
-
-
-# %% [7]  MAPA ANUAL COM CARTOPY  (um ano específico)
-# =============================================================================
-#
-# Gera o mapa para um único ano e abre inline no Spyder.
-# Para todos os anos de uma vez, use a célula [8].
-
-YEAR = int(df_tracked["datetime"].dt.year.mode()[0])   # ano mais frequente por default
-
-FIGURES_DIR.mkdir(parents=True, exist_ok=True)
-out_png = FIGURES_DIR / f"{PLOT_PREFIX}_{YEAR}.png"
-
-plot_yearly_tracks(
-    df_tracked, YEAR, out_png,
-    extent=PLOT_EXTENT, dpi=PLOT_DPI,
-)
-log.info("Mapa salvo: %s", out_png)
-
-# Exibe no painel de plots do Spyder
-img = plt.imread(out_png)
-fig, ax = plt.subplots(figsize=(8, 8))
-ax.imshow(img)
-ax.axis("off")
-ax.set_title(f"SA_tracked_{YEAR}")
-plt.tight_layout()
-plt.show()
-
-
-# %% [8]  MAPAS PARA TODOS OS ANOS
-# =============================================================================
-#
-# Pode demorar alguns minutos dependendo do volume de dados.
-
-paths = plot_all_years(
-    df_tracked,
-    out_dir        = FIGURES_DIR,
-    filename_prefix= PLOT_PREFIX,
-    extent         = PLOT_EXTENT,
-    dpi            = PLOT_DPI,
-)
-log.info("%d mapas gerados em %s", len(paths), FIGURES_DIR)
-
-
-# %% [9]  EXPERIMENTOS  (rodar sem salvar, para comparar parâmetros)
-# =============================================================================
-#
-# Útil para testar variações sem sobrescrever OUTPUT_PARQUET.
-# Resultado fica em df_exp — inspecione no Variable Explorer.
-
-opts_exp = TrackerOptions(
-    max_time_gap  = pd.Timedelta("20min"),
-    max_km        = 50.0,          # <- mude aqui
-    max_speed_kmh = 80.0,          # <- e aqui
-    min_points    = 30,            # <- e aqui
-    assignment    = "hungarian",   # <- greedy ou hungarian
-    min_area_km2  = MIN_AREA_KM2,
-    bbox          = bbox,
-)
-
-df_exp = track_centroids(df_raw, opts_exp)
-summary_exp = summarize_tracks(df_exp)
-
-print(f"\nExperimento:")
-print(f"  Trilhas : {df_exp['track_id'].nunique()}")
-print(f"  Duração média : {summary_exp['duration_h'].mean():.1f} h")  # type: ignore[index]
-print(f"\nComparação com produção:")
-print(f"  Produção — trilhas: {df_tracked['track_id'].nunique()}, "
-      f"duração média: {df_summary['duration_h'].mean():.1f} h")
