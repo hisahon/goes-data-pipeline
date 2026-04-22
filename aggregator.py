@@ -154,91 +154,83 @@ def haversine_dist(lat1, lon1, lat2, lon2):
     a = np.sin(dphi / 2) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlambda / 2) ** 2
     return 2 * R * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
 
-
 def track_multiple_clusters(
     df: pd.DataFrame,
     max_speed_kmh: float = 120.0,
     max_gap_minutes: float = 60.0,
     time_col: str = "datetime",
+    area_col: str = "area_km2"
 ) -> pd.DataFrame:
-    """Rastreia múltiplos clusters independentes no espaço-tempo.
-
-    Atribui uma coluna ``track_id`` única para cada sistema contínuo.
-    NÃO descarta linhas — preserva todos os clusters, apenas adiciona o
-    ``track_id`` que conecta observações sucessivas do mesmo sistema.
-
-    Parameters
-    ----------
-    df
-        DataFrame com colunas ``datetime``, ``centroid_lat``, ``centroid_lon``.
-    max_speed_kmh
-        Velocidade máxima plausível de deslocamento do sistema. Usada como
-        limite dinâmico: distância_max = max_speed_kmh × Δt_horas.
-    max_gap_minutes
-        Gap temporal máximo para manter um track "ativo". Acima disso o
-        track é encerrado e novos clusters viram novos tracks.
+    """
+    Tracks multiple clusters using Effective Radius Overlap and kinematic limits.
+    Perfect for massive, highly deformable convective systems.
     """
     if df.empty:
         return df.copy()
 
-    logger.info("Tracking multiple clusters spatially and temporally...")
-    # Reset index to guarantee uniqueness (df.at requires unique labels).
+    logger.info("Tracking massive clusters using Effective Radius overlap...")
     df = df.sort_values(time_col).reset_index(drop=True).copy()
     df["track_id"] = -1
     next_track_id = 1
 
-    # Last known state of active tracks
     active_tracks: dict[int, dict] = {}
-
     timestamps = df[time_col].unique()
-
-    # Precompute index groups by timestamp to avoid O(N*M) scan
     groups = df.groupby(time_col, sort=False).indices
 
     for t in timestamps:
         current_idx = groups[t]
         current_lats = df.loc[current_idx, "centroid_lat"].to_numpy()
         current_lons = df.loc[current_idx, "centroid_lon"].to_numpy()
+        
+        # Calculate Effective Radius (km) assuming the area is roughly circular
+        current_areas = df.loc[current_idx, area_col].to_numpy()
+        current_radii = np.sqrt(current_areas / np.pi)
 
-        # 1. Drop expired tracks
         current_time = pd.Timestamp(t)
+        
+        # 1. Drop expired tracks
         active_tracks = {
             tid: data for tid, data in active_tracks.items()
             if (current_time - data['time']).total_seconds() / 60.0 <= max_gap_minutes
         }
 
-        # 2. No active tracks -> all current clusters get new IDs
+        # 2. No active tracks
         if not active_tracks:
             for i, idx in enumerate(current_idx):
                 df.at[idx, "track_id"] = next_track_id
                 active_tracks[next_track_id] = {
-                    'lat': current_lats[i],
-                    'lon': current_lons[i],
-                    'time': current_time,
+                    'lat': current_lats[i], 'lon': current_lons[i], 
+                    'time': current_time, 'radius': current_radii[i]
                 }
                 next_track_id += 1
             continue
 
-        # 3. Greedy distance-based matching
+        # 3. Matching
         track_ids = list(active_tracks.keys())
         track_lats = np.array([active_tracks[tid]['lat'] for tid in track_ids])
         track_lons = np.array([active_tracks[tid]['lon'] for tid in track_ids])
+        track_radii = np.array([active_tracks[tid]['radius'] for tid in track_ids])
         track_times = [active_tracks[tid]['time'] for tid in track_ids]
 
         dist_matrix = np.zeros((len(track_ids), len(current_idx)))
-        time_deltas_hours = np.zeros(len(track_ids))
+        threshold_matrix = np.zeros((len(track_ids), len(current_idx)))
 
         for i, tid in enumerate(track_ids):
             dt_hours = (current_time - track_times[i]).total_seconds() / 3600.0
-            time_deltas_hours[i] = dt_hours
+            
+            # The maximum allowed distance is now the sum of their physical sizes 
+            # (meaning they are touching/overlapping) PLUS the expected physical movement.
+            kinematic_allowance = dt_hours * max_speed_kmh
+            
             for j in range(len(current_idx)):
                 dist_matrix[i, j] = haversine_dist(
                     track_lats[i], track_lons[i],
                     current_lats[j], current_lons[j],
                 )
+                # Dynamic threshold based on the actual size of the storms
+                threshold_matrix[i, j] = track_radii[i] + current_radii[j] + kinematic_allowance
 
-        thresholds = (time_deltas_hours * max_speed_kmh).reshape(-1, 1)
-        valid_matches = dist_matrix <= thresholds
+        valid_matches = dist_matrix <= threshold_matrix
 
         assigned_current: set[int] = set()
         assigned_tracks: set[int] = set()
@@ -250,29 +242,26 @@ def track_multiple_clusters(
                 continue
             if not valid_matches[t_idx, c_idx]:
                 continue
+            
             tid = track_ids[t_idx]
             df.at[current_idx[c_idx], "track_id"] = tid
             active_tracks[tid] = {
-                'lat': current_lats[c_idx],
-                'lon': current_lons[c_idx],
-                'time': current_time,
+                'lat': current_lats[c_idx], 'lon': current_lons[c_idx],
+                'time': current_time, 'radius': current_radii[c_idx]
             }
             assigned_current.add(int(c_idx))
             assigned_tracks.add(int(t_idx))
 
-        # 4. Unmatched current clusters -> new tracks
+        # 4. Unmatched -> new tracks
         for j, idx in enumerate(current_idx):
             if j not in assigned_current:
                 df.at[idx, "track_id"] = next_track_id
                 active_tracks[next_track_id] = {
-                    'lat': current_lats[j],
-                    'lon': current_lons[j],
-                    'time': current_time,
+                    'lat': current_lats[j], 'lon': current_lons[j],
+                    'time': current_time, 'radius': current_radii[j]
                 }
                 next_track_id += 1
 
-    n_tracks = df["track_id"].nunique()
-    logger.info("Rastreados %d sistemas em %d observações.", n_tracks, len(df))
     return df
 
 
@@ -605,3 +594,92 @@ def plot_multicluster_overlay(
         fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
         logger.info("Figura salva: %s", out_path)
     return fig
+
+
+def plot_tracks_latlon(
+    df: pd.DataFrame,
+    out_path: Path | str | None = None,
+    size_col: str = "area_km2",
+    size_scale: float = 1e4,
+    time_col: str = "datetime"
+):
+    """
+    Plota as trajetórias (Lat x Lon) dos sistemas rastreados,
+    atribuindo uma cor única para cada 'track_id' e anotando o horário de início.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+
+    if df.empty or "track_id" not in df.columns:
+        logger.warning("DataFrame vazio ou sem 'track_id'. Abortando plot.")
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    # Gera uma paleta de cores para os tracks
+    unique_tracks = df["track_id"].unique()
+    cmap = plt.get_cmap("tab20")
+    colors = cmap(np.linspace(0, 1, len(unique_tracks)))
+    
+    # Embaralha as cores para garantir que tracks sequenciais tenham cores bem distintas
+    np.random.seed(42)
+    np.random.shuffle(colors) 
+    track_colors = dict(zip(unique_tracks, colors))
+
+    # Plota cada sistema (track) separadamente
+    for track_id, group in df.groupby("track_id"):
+        # Garante que os pontos estão em ordem cronológica
+        group = group.sort_values(time_col)
+        c = track_colors[track_id]
+        
+        # 1. Traça a linha de trajetória conectando os pontos
+        ax.plot(group["centroid_lon"], group["centroid_lat"], 
+                color=c, alpha=0.5, linewidth=2, zorder=1)
+        
+        # 2. Plota os clusters individuais (tamanho proporcional à área)
+        if size_col in group.columns:
+            sizes = group[size_col] / size_scale
+        else:
+            sizes = 30
+            
+        ax.scatter(group["centroid_lon"], group["centroid_lat"], 
+                   color=c, s=sizes, alpha=0.7, edgecolor='white', linewidth=0.5, zorder=2)
+        
+        # 3. Destaca o ponto inicial (gênese do sistema) com uma estrela preta
+        lon_start = group["centroid_lon"].iloc[0]
+        lat_start = group["centroid_lat"].iloc[0]
+        time_start = group[time_col].iloc[0]
+        
+        ax.scatter(lon_start, lat_start, 
+                   color=c, s=sizes.iloc[0]*1.5, marker='*', edgecolor='black', zorder=3)
+
+        # 4. Anota o horário de início ao lado da estrela
+        # Converte para datetime garantido e formata (Ex: "14:30" ou "Dia 12 14:30")
+        dt_start = pd.to_datetime(time_start)
+        time_str = dt_start.strftime('%Y-%j [%H:%M]') # Use '%d/%m %H:%M' se quiser o dia também
+        
+        ax.annotate(time_str, 
+                    (lon_start, lat_start),
+                    xytext=(6, -16), # Leve deslocamento (offset) em pixels para não cobrir a estrela
+                    textcoords='offset points',
+                    fontsize=8,
+                    fontweight='bold',
+                    color='black',
+                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=c, alpha=0.8),
+                    zorder=4)
+
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+    ax.set_title("Trajetória Espacial dos Sistemas Convectivos\n(Estrela e rótulo indicam o local e horário de origem)")
+    ax.grid(True, linestyle="--", alpha=0.6)
+    
+    plt.tight_layout()
+    
+    if out_path:
+        out_path = Path(out_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(out_path, dpi=300, bbox_inches="tight")
+        logger.info("Plot de trajetória salvo em: %s", out_path)
+        
+    return fig, ax

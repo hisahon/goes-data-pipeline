@@ -18,20 +18,22 @@ Autor: Rogério Hisashi Honda <hisashi.brase@gmail.com>
 from pathlib import Path
 
 # --- Entrada: árvore dos reports/*.txt produzidos por visual.py ---
-REPORTS_DIR     = Path("reports")
+
+year,doy = 2025, 298
+REPORTS_DIR     = Path(f"reports/{year:04d}/{doy:03d}")
 
 # --- Saídas em parquet (idempotentes: reusa se já existir) ---
-AGG_PARQUET     = Path("merged/2962021.parquet")       # todas as detecções (bruto)
-TRACKED_PARQUET = Path("merged/2962021u.parquet")      # mesmas linhas + track_id
+AGG_PARQUET     = Path(f"merged/{year}-{doy}_raw.parquet")       # todas as detecções (bruto)
+AGGREGATED_PARQUET = Path(f"merged/{year}-{doy}_aggregated_clusters.parquet")      # mesmas linhas + track_id
 
 # --- Pastas de figuras ---
 FIGURES_DIR     = Path("results")
 
 # --- Parâmetros da análise ---
 SIZE_COL        = "area_km2"    # coluna usada no tamanho dos pontos
-MIN_HOURS       = 16            # duração mínima de sistemas (tracks)
+MIN_HOURS       = 4.            # duração mínima de sistemas (tracks)
 GAP_MINUTES     = 30            # gap temporal máximo dentro de um track
-AREA_LABEL      = "Area > 200k km²"
+AREA_LABEL      = "Area > 200k km² | Duration > 4h"
 PLOT_PREFIX     = "doy_hour_runs"
 PALETTE         = "tab20"       # 20 cores para distinguir mais tracks simultâneos
 N_COLORS        = 20
@@ -51,6 +53,7 @@ import matplotlib.pyplot as plt
 
 from aggregator import (
     reports2df,
+    plot_tracks_latlon,
     make_unique_by_time,               # ainda disponível (desempate simples)
     track_multiple_clusters,
     filter_continuous_runs,
@@ -106,9 +109,9 @@ print(df.describe().round(2))
 # a adição da coluna ``track_id`` que identifica qual sistema cada ponto
 # pertence. Sistemas simultâneos viram tracks distintos.
 
-if TRACKED_PARQUET.exists():
-    log.info("Carregando tracked existente: %s", TRACKED_PARQUET)
-    df_u = pd.read_parquet(TRACKED_PARQUET)
+if AGGREGATED_PARQUET.exists():
+    log.info("Carregando tracked existente: %s", AGGREGATED_PARQUET)
+    df_u = pd.read_parquet(AGGREGATED_PARQUET)
     df_u["datetime"] = pd.to_datetime(df_u["datetime"], errors="coerce")
 else:
     df_u = track_multiple_clusters(
@@ -116,9 +119,7 @@ else:
         max_speed_kmh=MAX_SPEED_KMH,
         max_gap_minutes=GAP_MINUTES,
     )
-    TRACKED_PARQUET.parent.mkdir(parents=True, exist_ok=True)
-    df_u.to_parquet(TRACKED_PARQUET, index=False)
-    log.info("Salvo: %s", TRACKED_PARQUET)
+    log.info("Tracked: %s", AGGREGATED_PARQUET)
 
 n_tracks = df_u["track_id"].nunique()
 log.info("Rastreados %d sistemas em %d observações (nenhum registro descartado).",
@@ -132,8 +133,14 @@ log.info("Rastreados %d sistemas em %d observações (nenhum registro descartado
 # runs:    resumo por track (início, fim, duração em minutos)
 
 df_cont, runs = filter_continuous_runs(
-    df_u, min_hours=MIN_HOURS, gap_minutes=GAP_MINUTES,
+    df_u,
+    min_hours=MIN_HOURS,
+    gap_minutes=GAP_MINUTES,
+    time_col='datetime'
 )
+
+AGGREGATED_PARQUET.parent.mkdir(parents=True, exist_ok=True)
+df_cont.to_parquet(AGGREGATED_PARQUET, index=False)
 
 print(f"\nTotal de tracks: {len(runs)}")
 print(f"Tracks válidos (≥ {MIN_HOURS} h): {(runs['duration_min'] >= MIN_HOURS*60).sum()}")
@@ -245,3 +252,17 @@ plt.title("Concorrência temporal de sistemas convectivos")
 plt.tight_layout()
 plt.show()
  
+
+# %% [9]  PLOT TRAJETÓRIAS (LAT x LON) 
+# =============================================================================
+# Mapeia o deslocamento geográfico dos sistemas rastreados.
+# Usamos o `df_cont` para visualizar apenas os sistemas validados (longos),
+# evitando que a tela fique poluída com nuvens pequenas isoladas.
+
+plot_tracks_latlon(
+    df_cont, 
+    out_path=FIGURES_DIR / f"{year}-{doy}_SpatialTrajectories.png",
+    size_col=SIZE_COL,
+    size_scale=1e4 # Ajuste esse valor para calibrar o tamanho das "bolhas" no gráfico
+)
+plt.show()
