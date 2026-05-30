@@ -30,7 +30,7 @@ from pathlib import Path
 # from datetime import datetime
 import numpy as np
 from tqdm import tqdm
-from detector import read_goes_file
+from shared.detector import read_goes_file
 from datetime import datetime
 import re
 # from typing import Iterable, Optional, Tuple

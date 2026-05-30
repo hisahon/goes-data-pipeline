@@ -27,8 +27,8 @@ from urllib.parse import urljoin
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor
 
-from detector import read_goes_file
-from converter import save_netcdf2numpy
+from shared.detector import read_goes_file
+from shared.converter import save_netcdf2numpy
 
 
 # =============================================================================
@@ -353,8 +353,6 @@ def download_goes_multiproc(
             for status, name, info in results:
                 if status == "ok":
                     ok += 1
-                    pbar.update(1)
-                    # Refresh the description every 10 files to keep UI light.
                     if ok % 10 == 0:
                         stamp = _stamp_from_name(name)
                         if stamp:
@@ -363,8 +361,10 @@ def download_goes_multiproc(
                     skipped_runtime += 1
                 else:
                     err += 1
-                    if err % 5 == 0:
-                        pbar.set_postfix_str(f"errors: {err}")
+                    if err <= 5:                          # mostra os 5 primeiros erros
+                        print(f"\n[ERRO] {name}: {info}")
+                    pbar.set_postfix_str(f"errors: {err}")
+                pbar.update(1)                            # avança para TODO arquivo
 
     print(
         f"\nResumo MP: total_enfileirado={len(tasks)} "
@@ -455,7 +455,7 @@ def defining_folders(server_ON: bool) -> dict:
 # =============================================================================
 # Entry points
 # =============================================================================
-def main():
+def main_manual():
     """Run with hard-coded parameters (no CLI)."""
     # Load the South America mask; `extent` is [lon_min, lon_max, lat_min, lat_max].
     dat = np.load("mask_SouthAmerica.npz")
@@ -558,8 +558,8 @@ def main_terminal():
 
 
 if __name__ == "__main__":
-    # main()             # Hard-coded parameters.
-    main_terminal()      # CLI mode (argparse).
+    main()             # Hard-coded parameters.
+    # main_terminal()      # CLI mode (argparse).
 
 
 # -----------------------------------------------------------------------------
