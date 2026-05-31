@@ -216,7 +216,7 @@ def temperature_plot_cartopy(temp, lats, lons, t_threshold, min_area_km2,
 
     # --- Save ---
     folders['fig_folder'].mkdir(parents=True, exist_ok=True)
-    fig.savefig(folders['fig_path'], dpi=75, bbox_inches="tight",
+    fig.savefig(folders['fig_path'], dpi=150, bbox_inches="tight",
                 pad_inches=0.05, metadata=png_meta)
     plt.close(fig)
 
