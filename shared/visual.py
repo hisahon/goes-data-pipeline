@@ -33,10 +33,10 @@ import numpy as np
 # Module renames applied in this refactor:
 #   dbscan     -> detector
 #   goes2numpy -> converter
-from detector import detect_clusters_area6 as dca
-from detector import read_npz_goes
-from converter import extract_datetime_from_filename
-from download_v4 import _auto_workers
+from shared.detector import detect_clusters_area6 as dca
+from shared.detector import read_npz_goes
+from shared.converter import extract_datetime_from_filename
+from shared.download import _auto_workers
 
 
 # =============================================================================
@@ -165,7 +165,7 @@ def figure_path(file_path, OPTIONS):
     year = ts.strftime("%Y")
     doy = ts.timetuple().tm_yday        # Day-of-year (1–366), used as folder name.
     hhmm = ts.strftime("%H%M")
-    ts_title = ts.strftime("%Y/%m/%d %H:%M (%j)")
+    ts_title = ts.strftime("%j-%Y %H:%M")
 
     fig_folder = OPTIONS["root_folder_fig"] / year / f"{doy:03d}"
     fig_name = f"C13_{year}-{doy:03d}_{hhmm}.png"
@@ -208,7 +208,7 @@ def process_file_parallel(f, OPTIONS):
         #     unrecoverable and removed so later runs don't hit it again.
         try:
             temp, lats, lons = read_npz_goes(f)
-            labels, cold_spot, plot_ON = dca(f, temp, OPTIONS, folders, plot=True)
+            dca(f, temp, OPTIONS, folders, plot=True)
         except Exception:
             f.unlink(missing_ok=True)
             return f"{folders['time_string']} | Numpy file broken [deleted] {f}"
@@ -451,12 +451,12 @@ def process_goes_mpi(files, options):
 def process_file(f, OPTIONS, folders):
     """Single-file worker used by the serial path."""
     temp, lats, lons = read_npz_goes(f)
-    labels, cold_spot = dca(f, temp, OPTIONS, folders, lats, lons, plot=True)
+    dca(f, temp, OPTIONS, folders, plot_ON=True)
 
-    if cold_spot:
-        ...
-    else:
-        print(f"No clusters -> deleting: {f.name}")
+    # if cold_spot:
+    #     ...
+    # else:
+    #     print(f"No clusters -> deleting: {f.name}")
 
 
 def process_goes_folder(files, OPTIONS):
@@ -534,9 +534,9 @@ def main(server_ON=False, parallel_ON=False, mpi_ON=False,
     # -------------------------------------------------------------------------
     if os.name == "nt":
         # Windows workstation.
-        ROOT_FOLDER = Path("D:/banco_dados/cptec/database_numpy")
-        ROOT_FOLDER_FIG = Path(f"D:/banco_dados/cptec/figures{output_key}")
-        ROOT_FOLDER_REPORTs = Path(f"D:/banco_dados/cptec/reports{output_key}")
+        ROOT_FOLDER = Path("D:/goes-data-pipeline/database_numpy")
+        ROOT_FOLDER_FIG = Path(f"D:/goes-data-pipeline/figures{output_key}")
+        ROOT_FOLDER_REPORTs = Path(f"D:/goes-data-pipeline/reports{output_key}")
     elif os.name == "posix":
         if server_ON:
             # Remote / headless server: everything under $HOME.

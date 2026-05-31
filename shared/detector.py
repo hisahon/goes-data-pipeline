@@ -67,68 +67,23 @@ def pix2ll(y_idx, x_idx, temp, lats, lons, use_geo):
     return lons[x_idx], lats[y_idx]
 
 
-
-# def temperature_plot(temp, lats, lons, t_threshold, min_area_km2,
-#                      props, labels_filtered, fp):
-#     fig, ax = plt.subplots(figsize=(10, 8))
-#     use_geo = (lats is not None) and (lons is not None)
-    
-#     im = ax.pcolormesh(lons, lats, temp, cmap="gist_ncar",
-#                            shading="auto", vmin=-80, vmax=0)
-
-#     title = f"Cold Clusters (T<{t_threshold}°C, area>{min_area_km2:.0f} km², n={len(props)}), {fp[2]}"
-#     ax.set_title(title)
-#     fig.colorbar(im, ax=ax, label="Brightness Temp (°C)", shrink=1., aspect=45, pad=0.001)
-#     pe = [patheffects.withStroke(linewidth=2.2, foreground="black")]
-    
-    
-    
-#     for i, p in enumerate(props, 1):
-#         mask_i = labels_filtered == i
-#         cluster_min = np.nanmin(temp[mask_i])
-        
-#         for c in find_contours(mask_i.astype(float), 0.5):
-#             lon_line, lat_line = pix2ll(c[:, 0], c[:, 1], temp, lats, lons, use_geo)
-#             ax.plot(lon_line, lat_line, color='black', linewidth=0.7, path_effects=pe)
-    
-#         cy, cx = p.centroid
-#         lon_c, lat_c = pix2ll(cy, cx, temp, lats, lons, use_geo)
-#         area_str = f"{int(p.real_area_km2/1000):,}k km² \n{cluster_min:.1f} °C"
-        
-#         if not cluster_min <= -65:
-#             ax.text(lon_c, lat_c, area_str, color="white", ha="center", va="center", fontsize=8, path_effects=pe)
-#         else:
-#             ax.text(lon_c, lat_c, area_str, color="white", ha="center", va="center", fontsize=9, fontweight='bold', path_effects=pe)
-    
-#     ax.set_xlabel("Longitude (°)")
-#     ax.set_ylabel("Latitude (°)")
-#     ax.set_aspect("equal", adjustable="box")
-#     ax.grid(True, linestyle="--", alpha=0.4)
-    
-#     Path(fp[0]).mkdir(parents=True, exist_ok=True)
-#     # fig.tight_layout()
-#     fig.savefig(fp[1], dpi=65, bbox_inches='tight')
-    
-    
-#     plt.close('all')
-    
-
-
-
 def temperature_plot_cartopy(temp, lats, lons, t_threshold, min_area_km2,
-                     props, labels_filtered, folders):
-    
+                             props, labels_filtered, folders,
+                             deep_conv_threshold=-65):
+
+    import datetime
     import matplotlib as mpl
     import matplotlib.pyplot as plt
     import cartopy.crs as ccrs
     import cartopy.feature as cfeature
-    import matplotlib.patheffects as patheffects   # <-- ADD THIS IMPORT
-
-    mpl.use("Agg", force=True)   # backend sem GUI
+    import matplotlib.patheffects as patheffects
+    mpl.use("Agg", force=True)
     plt.ioff()
-    
+
     """
-    Cartopy-based plot of GOES temperature with cluster contours and annotations.
+    Cartopy-based plot of GOES brightness temperature with cluster contours.
+    Detection: contiguous pixels colder than `t_threshold` whose area exceeds
+    `min_area_km2`. Clusters colder than `deep_conv_threshold` flagged as deep convection.
     """
     if lats is None or lons is None:
         raise ValueError("Cartopy plot requires lats and lons arrays in degrees.")
@@ -136,7 +91,6 @@ def temperature_plot_cartopy(temp, lats, lons, t_threshold, min_area_km2,
     # --- Figure & geo axes ---
     fig = plt.figure(figsize=(7, 7))
     proj = ccrs.PlateCarree()
-
     ax = fig.add_subplot(1, 1, 1, projection=proj)
 
     # --- Core image ---
@@ -146,7 +100,7 @@ def temperature_plot_cartopy(temp, lats, lons, t_threshold, min_area_km2,
         shading="auto",
         vmin=-80, vmax=0,
         rasterized=True,
-        transform=ccrs.PlateCarree()  # data are in lat/lon
+        transform=ccrs.PlateCarree()
     )
 
     # --- Extent (with a small pad) ---
@@ -155,29 +109,43 @@ def temperature_plot_cartopy(temp, lats, lons, t_threshold, min_area_km2,
         ymin, ymax = float(np.nanmin(lats)), float(np.nanmax(lats))
         pad_x = (xmax - xmin) * 0.02
         pad_y = (ymax - ymin) * 0.02
-
-        ax.set_extent([xmin - pad_x, xmax + pad_x, ymin - pad_y, ymax + pad_y], crs=ccrs.PlateCarree())
-
+        ax.set_extent([xmin - pad_x, xmax + pad_x, ymin - pad_y, ymax + pad_y],
+                      crs=ccrs.PlateCarree())
     except Exception:
-        pass  # keep default if bounds fail
+        pass
 
-    # --- Coastlines, borders, etc. ---
+    # --- Coastlines, borders ---
     ax.coastlines(resolution="110m", color="black", linewidth=0.5)
     ax.add_feature(cfeature.BORDERS, edgecolor="black", linewidth=0.3)
-    # Optional extras:
-    # ax.add_feature(cfeature.LAKES, edgecolor="white", facecolor="none", linewidth=0.3)
-    # ax.add_feature(cfeature.RIVERS, edgecolor="lightblue", linewidth=0.2)
 
-    # --- Title & slim colorbar ---
-    title = f"(T<{t_threshold}°C, area>{int(min_area_km2/1000)}k km², n={len(props)}), {folders['time_string']}"
-    ax.set_title(title)
+    # --- Summary stats (for title, caption & embedded metadata) ---
+    n_clusters = len(props)
+    total_area_k = sum(getattr(p, "real_area_km2", 0) for p in props) / 1000.0
+    try:
+        coldest = float(np.nanmin(temp[labels_filtered > 0])) if n_clusters else float("nan")
+    except Exception:
+        coldest = float("nan")
 
+    # --- Compact title (centered over the MAP, not the whole figure) ---
+    ax.set_title(
+        f"{folders['time_string']} UTC | "
+        f"Isotherms = {t_threshold} °C | "
+        f"Clusters = {len(props)}"
+        ,
+        fontsize=9, fontweight="bold", pad=6
+    )
+
+    # --- Colorbar with threshold reference lines ---
     cbar = fig.colorbar(
         im, ax=ax,
-        label="Brightness Temp (°C)",
-        fraction=0.026, pad=0.01, aspect=35
+        label="Brightness temperature (°C)",
+        fraction=0.026, pad=0.01, aspect=45
     )
     cbar.ax.tick_params(labelsize=8)
+    # detection threshold (solid) and deep-convection threshold (dotted)
+    cbar.ax.axhline(t_threshold, color="white", linewidth=1.2)
+    cbar.ax.axhline(t_threshold, color="black", linewidth=0.5)
+    cbar.ax.axhline(deep_conv_threshold, color="black", linewidth=0.8, linestyle=":")
 
     # --- Gridlines with labels ---
     gl = ax.gridlines(draw_labels=True, linewidth=0.3, color="gray",
@@ -187,12 +155,10 @@ def temperature_plot_cartopy(temp, lats, lons, t_threshold, min_area_km2,
 
     # --- Contours & labels ---
     pe = [patheffects.withStroke(linewidth=2.2, foreground="black")]
-
     for i, p in enumerate(props, 1):
         mask_i = labels_filtered == i
         cluster_min = np.nanmin(temp[mask_i])
 
-        # Outlines for every cluster
         for c in find_contours(mask_i.astype(float), 0.5):
             lon_line, lat_line = pix2ll(c[:, 0], c[:, 1], temp, lats, lons, use_geo=True)
             ax.plot(
@@ -201,30 +167,171 @@ def temperature_plot_cartopy(temp, lats, lons, t_threshold, min_area_km2,
                 transform=ccrs.PlateCarree()
             )
 
-        # Centroid + annotation
         cy, cx = p.centroid
         lon_c, lat_c = pix2ll(cy, cx, temp, lats, lons, use_geo=True)
         area_str = f"{int(p.real_area_km2/1000):,}k km²\n{cluster_min:.1f} °C"
 
-        # Keep your original highlight logic (bold for ≤ -65 °C)
-        if cluster_min <= -65:
-            fsize, fweight, txt_color = 9, "bold", "white"
+        if cluster_min <= deep_conv_threshold:
+            fsize, fweight = 9, "bold"
         else:
-            fsize, fweight, txt_color = 8, "normal", "white"
-
+            fsize, fweight = 8, "normal"
+        
+        # fsize, fweight = 6, "bold"
         ax.text(
             lon_c, lat_c, area_str,
-            color=txt_color, fontsize=fsize, fontweight=fweight,
+            color="white", fontsize=fsize, fontweight=fweight,
             ha="center", va="center",
             path_effects=pe,
             transform=ccrs.PlateCarree()
         )
+        
+    # --- Reference marker (red star) ---
+    ax.scatter(
+        -44.12, -20.14,
+        marker="*", s=180,
+        color="red", edgecolor="black", linewidth=0.6,
+        transform=ccrs.PlateCarree(),
+        zorder=5
+    )
+    # # --- Parameter caption below the map (what the numbers mean) ---
+    # caption = (
+    #     f"Detection: contiguous pixels with brightness temperature "
+    #     f"< {t_threshold} °C (contour line),\n"
+    #     f"minimum cluster area {min_area_km2/1000:.0f}k km².  "
+    #     f"Bold labels: deep convection (≤ {deep_conv_threshold} °C)."
+    # )
+    # ax.text(0.5, -0.16, caption, transform=ax.transAxes,
+    #         ha="center", va="top", fontsize=7, color="0.30")
 
-    # --- Save (cropped & lightweight) ---
+    # --- Embedded PNG metadata (all the verbose provenance lives here) ---
+    png_meta = {
+        "Title": f"GOES deep convective cloud detection {folders['time_string']}",
+        "Description": (f"detection T<{t_threshold}C, min area {min_area_km2/1000:.0f}k km2, "
+                        f"deep-convection <={deep_conv_threshold}C, n={n_clusters}, "
+                        f"total {total_area_k:.0f}k km2, coldest {coldest:.1f}C"),
+        "Source": "GOES ABI",                    # ajuste p/ GOES-16/19 + banda (ex.: Band 13 ~10.3 um)
+        "Software": "matplotlib + cartopy",
+        "Creation Time": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+    # --- Save ---
     folders['fig_folder'].mkdir(parents=True, exist_ok=True)
-    fig.tight_layout(pad=0)
-    fig.savefig(folders['fig_path'], dpi=70, bbox_inches="tight", pad_inches=0)
+    fig.savefig(folders['fig_path'], dpi=75, bbox_inches="tight",
+                pad_inches=0.05, metadata=png_meta)
     plt.close(fig)
+
+
+
+# def temperature_plot_cartopy(temp, lats, lons, t_threshold, min_area_km2,
+#                      props, labels_filtered, folders):
+    
+#     import matplotlib as mpl
+#     import matplotlib.pyplot as plt
+#     import cartopy.crs as ccrs
+#     import cartopy.feature as cfeature
+#     import matplotlib.patheffects as patheffects   # <-- ADD THIS IMPORT
+
+#     mpl.use("Agg", force=True)   # backend sem GUI
+#     plt.ioff()
+    
+#     """
+#     Cartopy-based plot of GOES temperature with cluster contours and annotations.
+#     """
+#     if lats is None or lons is None:
+#         raise ValueError("Cartopy plot requires lats and lons arrays in degrees.")
+
+#     # --- Figure & geo axes ---
+#     fig = plt.figure(figsize=(7, 7))
+#     proj = ccrs.PlateCarree()
+
+#     ax = fig.add_subplot(1, 1, 1, projection=proj)
+
+#     # --- Core image ---
+#     im = ax.pcolormesh(
+#         lons, lats, temp,
+#         cmap="gist_ncar",
+#         shading="auto",
+#         vmin=-80, vmax=0,
+#         rasterized=True,
+#         transform=ccrs.PlateCarree()  # data are in lat/lon
+#     )
+
+#     # --- Extent (with a small pad) ---
+#     try:
+#         xmin, xmax = float(np.nanmin(lons)), float(np.nanmax(lons))
+#         ymin, ymax = float(np.nanmin(lats)), float(np.nanmax(lats))
+#         pad_x = (xmax - xmin) * 0.02
+#         pad_y = (ymax - ymin) * 0.02
+
+#         ax.set_extent([xmin - pad_x, xmax + pad_x, ymin - pad_y, ymax + pad_y], crs=ccrs.PlateCarree())
+
+#     except Exception:
+#         pass  # keep default if bounds fail
+
+#     # --- Coastlines, borders, etc. ---
+#     ax.coastlines(resolution="110m", color="black", linewidth=0.5)
+#     ax.add_feature(cfeature.BORDERS, edgecolor="black", linewidth=0.3)
+#     # Optional extras:
+#     # ax.add_feature(cfeature.LAKES, edgecolor="white", facecolor="none", linewidth=0.3)
+#     # ax.add_feature(cfeature.RIVERS, edgecolor="lightblue", linewidth=0.2)
+
+#     # --- Title & slim colorbar ---
+#     title = f"(T<{t_threshold}°C, area>{int(min_area_km2/1000)}k km², n={len(props)}), {folders['time_string']}"
+#     ax.set_title(title)
+
+#     cbar = fig.colorbar(
+#         im, ax=ax,
+#         label="Brightness Temp (°C)",
+#         fraction=0.026, pad=0.01, aspect=35
+#     )
+#     cbar.ax.tick_params(labelsize=8)
+
+#     # --- Gridlines with labels ---
+#     gl = ax.gridlines(draw_labels=True, linewidth=0.3, color="gray",
+#                       alpha=0.5, linestyle="--")
+#     gl.top_labels = False
+#     gl.right_labels = False
+
+#     # --- Contours & labels ---
+#     pe = [patheffects.withStroke(linewidth=2.2, foreground="black")]
+
+#     for i, p in enumerate(props, 1):
+#         mask_i = labels_filtered == i
+#         cluster_min = np.nanmin(temp[mask_i])
+
+#         # Outlines for every cluster
+#         for c in find_contours(mask_i.astype(float), 0.5):
+#             lon_line, lat_line = pix2ll(c[:, 0], c[:, 1], temp, lats, lons, use_geo=True)
+#             ax.plot(
+#                 lon_line, lat_line,
+#                 color="black", linewidth=0.7, path_effects=pe,
+#                 transform=ccrs.PlateCarree()
+#             )
+
+#         # Centroid + annotation
+#         cy, cx = p.centroid
+#         lon_c, lat_c = pix2ll(cy, cx, temp, lats, lons, use_geo=True)
+#         area_str = f"{int(p.real_area_km2/1000):,}k km²\n{cluster_min:.1f} °C"
+
+#         # Keep your original highlight logic (bold for ≤ -65 °C)
+#         if cluster_min <= -65:
+#             fsize, fweight, txt_color = 9, "bold", "white"
+#         else:
+#             fsize, fweight, txt_color = 8, "normal", "white"
+
+#         ax.text(
+#             lon_c, lat_c, area_str,
+#             color=txt_color, fontsize=fsize, fontweight=fweight,
+#             ha="center", va="center",
+#             path_effects=pe,
+#             transform=ccrs.PlateCarree()
+#         )
+
+#     # --- Save (cropped & lightweight) ---
+#     folders['fig_folder'].mkdir(parents=True, exist_ok=True)
+#     fig.tight_layout(pad=0)
+#     fig.savefig(folders['fig_path'], dpi=70, bbox_inches="tight", pad_inches=0)
+#     plt.close(fig)
 
 def yline(lons, lon0, lat0, ang):
     m = np.tan(np.deg2rad(ang))
@@ -313,7 +420,7 @@ def detect_clusters_area(f, temp, OPTIONS, fp, lats=None, lons=None, plot=True):
 
 
 
-def detect_clusters_area6(f, temp, OPTIONS, folders, plot=True):
+def detect_clusters_area6(f, temp, OPTIONS, folders, plot_ON=True):
 # def detect_clusters_area6(f, temp, OPTIONS, folders, lats=None, lons=None, plot=True):
     t_threshold    = OPTIONS['region_temperature_threshold']
     tmin_threshold = OPTIONS['min_temperature_threshold']
@@ -346,7 +453,7 @@ def detect_clusters_area6(f, temp, OPTIONS, folders, plot=True):
     # cold_spot = False
     labels_filtered = np.zeros_like(labeled, dtype=np.int32)
     i_new = 1
-    plot_ON = False
+    # plot_ON = True
     for p in regionprops(labeled, intensity_image=temp_smooth):
         mask_i = (labeled == p.label)
 
