@@ -187,7 +187,7 @@ def temperature_plot_cartopy(temp, lats, lons, t_threshold, min_area_km2,
         
     # --- Reference marker (red star) ---
     ax.scatter(
-        -44.12, -20.14,
+        -47.81, -21.18,
         marker="*", s=180,
         color="red", edgecolor="black", linewidth=0.6,
         transform=ccrs.PlateCarree(),

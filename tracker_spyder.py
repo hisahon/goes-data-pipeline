@@ -36,7 +36,7 @@ ASSIGNMENT     = "greedy"   # "greedy" (rápido) ou "hungarian" (ótimo por fram
 
 # --- Plot ---
 PLOT_EXTENT    = (LON_MIN, LON_MAX, LAT_MIN, LAT_MAX)  # (lon_min, lon_max, lat_min, lat_max)
-PLOT_PREFIX    = "SA_tracked"
+PLOT_PREFIX    = "Catastrofe2026_tracked"
 PLOT_DPI       = 300
 
 # =============================================================================

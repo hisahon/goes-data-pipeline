@@ -558,7 +558,7 @@ def main_terminal():
 
 
 if __name__ == "__main__":
-    main()             # Hard-coded parameters.
+    main_manual()             # Hard-coded parameters.
     # main_terminal()      # CLI mode (argparse).
 
 
