@@ -18,6 +18,31 @@ import numpy as np
 from skimage.measure import regionprops, label, find_contours
 from scipy.ndimage import gaussian_filter
 from pathlib import Path
+import matplotlib as mpl
+
+
+# =============================================================================
+# Escala de cores do canal 13 (10,35 µm)
+# =============================================================================
+# Faixas coloridas de 10 °C entre -80 e -30 °C e degradê de cinza claro -> preto
+# de -30 a 40 °C. Temperaturas repetidas criam os "saltos" de cor entre faixas.
+VMIN_TEMP = -80
+VMAX_TEMP = 40
+
+_TB_PONTOS = [
+    (-80, (224, 131, 224)), (-70, (255, 209, 255)),  # magenta -> rosa claro
+    (-70, (0, 0, 255)),     (-60, (82, 69, 255)),    # azul
+    (-60, (47, 218, 255)),  (-50, (156, 227, 245)),  # ciano
+    (-50, (255, 255, 97)),  (-40, (235, 255, 122)),  # amarelo
+    (-40, (255, 101, 1)),   (-30, (255, 158, 70)),   # laranja
+    (-30, (176, 176, 176)), (40, (0, 0, 0)),         # cinza claro -> preto
+]
+CMAP_GOES = mpl.colors.LinearSegmentedColormap.from_list(
+    "tb_realcada",
+    [((t - VMIN_TEMP) / (VMAX_TEMP - VMIN_TEMP), [v / 255 for v in c])
+     for t, c in _TB_PONTOS],
+    N=1024,
+)
 
 
 
@@ -96,9 +121,9 @@ def temperature_plot_cartopy(temp, lats, lons, t_threshold, min_area_km2,
     # --- Core image ---
     im = ax.pcolormesh(
         lons, lats, temp,
-        cmap="gist_ncar",
+        cmap=CMAP_GOES,
         shading="auto",
-        vmin=-80, vmax=0,
+        vmin=VMIN_TEMP, vmax=VMAX_TEMP,
         rasterized=True,
         transform=ccrs.PlateCarree()
     )
@@ -139,13 +164,14 @@ def temperature_plot_cartopy(temp, lats, lons, t_threshold, min_area_km2,
     cbar = fig.colorbar(
         im, ax=ax,
         label="Brightness temperature (°C)",
-        fraction=0.026, pad=0.01, aspect=45
+        fraction=0.026, pad=0.01, aspect=45,
+        ticks=list(range(VMIN_TEMP, VMAX_TEMP + 1, 10)),
     )
     cbar.ax.tick_params(labelsize=8)
     # detection threshold (solid) and deep-convection threshold (dotted)
-    cbar.ax.axhline(t_threshold, color="white", linewidth=1.2)
-    cbar.ax.axhline(t_threshold, color="black", linewidth=0.5)
-    cbar.ax.axhline(deep_conv_threshold, color="black", linewidth=0.8, linestyle=":")
+    # cbar.ax.axhline(t_threshold, color="white", linewidth=1.2)
+    cbar.ax.axhline(t_threshold, color="lime", linewidth=2.)
+    # cbar.ax.axhline(deep_conv_threshold, color="black", linewidth=0.8, linestyle=":")
 
     # --- Gridlines with labels ---
     gl = ax.gridlines(draw_labels=True, linewidth=0.3, color="gray",
@@ -154,7 +180,7 @@ def temperature_plot_cartopy(temp, lats, lons, t_threshold, min_area_km2,
     gl.right_labels = False
 
     # --- Contours & labels ---
-    pe = [patheffects.withStroke(linewidth=2.2, foreground="black")]
+    pe = [patheffects.withStroke(linewidth=1.5, foreground="black")]
     for i, p in enumerate(props, 1):
         mask_i = labels_filtered == i
         cluster_min = np.nanmin(temp[mask_i])
@@ -163,36 +189,38 @@ def temperature_plot_cartopy(temp, lats, lons, t_threshold, min_area_km2,
             lon_line, lat_line = pix2ll(c[:, 0], c[:, 1], temp, lats, lons, use_geo=True)
             ax.plot(
                 lon_line, lat_line,
-                color="black", linewidth=0.7, path_effects=pe,
+                color="lime", linewidth=0.7, path_effects=pe,
                 transform=ccrs.PlateCarree()
             )
-
-        cy, cx = p.centroid
-        lon_c, lat_c = pix2ll(cy, cx, temp, lats, lons, use_geo=True)
-        area_str = f"{int(p.real_area_km2/1000):,}k km²\n{cluster_min:.1f} °C"
-
-        if cluster_min <= deep_conv_threshold:
-            fsize, fweight = 9, "bold"
-        else:
-            fsize, fweight = 8, "normal"
         
-        # fsize, fweight = 6, "bold"
-        ax.text(
-            lon_c, lat_c, area_str,
-            color="white", fontsize=fsize, fontweight=fweight,
-            ha="center", va="center",
-            path_effects=pe,
-            transform=ccrs.PlateCarree()
-        )
+
+        if False:
+            cy, cx = p.centroid
+            lon_c, lat_c = pix2ll(cy, cx, temp, lats, lons, use_geo=True)
+            area_str = f"{int(p.real_area_km2/1000):,}k km²\n{cluster_min:.1f} °C"
+    
+            if cluster_min <= deep_conv_threshold:
+                fsize, fweight = 7, "bold"
+            else:
+                fsize, fweight = 6, "normal"
+            
+            # fsize, fweight = 6, "bold"
+            ax.text(
+                lon_c, lat_c, area_str,
+                color="white", fontsize=fsize, fontweight=fweight,
+                ha="center", va="center",
+                path_effects=pe,
+                transform=ccrs.PlateCarree()
+            )   
         
-    # --- Reference marker (red star) ---
-    ax.scatter(
-        -47.81, -21.18,
-        marker="*", s=180,
-        color="red", edgecolor="black", linewidth=0.6,
-        transform=ccrs.PlateCarree(),
-        zorder=5
-    )
+    # # --- Reference marker (red star) ---
+    # ax.scatter(
+    #     -47.81, -21.18,
+    #     marker="*", s=180,
+    #     color="red", edgecolor="black", linewidth=0.6,
+    #     transform=ccrs.PlateCarree(),
+    #     zorder=5
+    # )
     # # --- Parameter caption below the map (what the numbers mean) ---
     # caption = (
     #     f"Detection: contiguous pixels with brightness temperature "
@@ -419,6 +447,10 @@ def detect_clusters_area(f, temp, OPTIONS, fp, lats=None, lons=None, plot=True):
     return labels_filtered, cold_spot
 
 
+def edge_correction(sigma, sigma_ref=25.0, delta_ref=20.0):
+    """Quanto abaixar (°C) o campo suavizado: linear, 0 em sigma=0 e delta_ref em sigma=sigma_ref."""
+    return delta_ref * float(sigma) / sigma_ref
+
 
 def detect_clusters_area6(f, temp, OPTIONS, folders, plot_ON=True):
 # def detect_clusters_area6(f, temp, OPTIONS, folders, lats=None, lons=None, plot=True):
@@ -438,6 +470,7 @@ def detect_clusters_area6(f, temp, OPTIONS, folders, plot_ON=True):
     area_km2 = area_calc_km2(lats, lons)
     temp_smooth = np.where((temp > -150.), temp, 0)
     temp_smooth = gaussian_filter(temp_smooth, sigma=smooth_sigma)
+    temp_smooth = temp_smooth - edge_correction(smooth_sigma)
 
     # mask = region_mask_top_bottom(lats, lons)
     mask &= temp_smooth < t_threshold
@@ -513,7 +546,7 @@ def detect_clusters_area6(f, temp, OPTIONS, folders, plot_ON=True):
             fh.writelines(linhas)
         
     if plot_ON:
-        temperature_plot_cartopy(temp, lats, lons, t_threshold, min_area_km2, props, labels_filtered, folders)
+        temperature_plot_cartopy(temp, lats, lons, t_threshold, min_area_km2, props, labels_filtered, folders, tmin_threshold)
         
     return labels_filtered, i_new>1, plot_ON
 
@@ -576,8 +609,8 @@ if __name__ == "__main__":
     
     labels, props = detect_clusters_area(
         temp, lats, lons,
-        t_threshold=-45,
-        min_area_km2=150000,  # adjust depending on your MCS definition
+        t_threshold=-40,
+        min_area_km2=100000,  # adjust depending on your MCS definition
         pixel_km=3.3423826253593094,        # 2 km per pixel for CONUS domain
         smooth_sigma=20.0,
         plot=True

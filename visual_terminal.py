@@ -16,7 +16,7 @@ if __name__ == "__main__":
         server_ON=False,
         parallel_ON=False,
         mpi_ON=False,
-        n_workers = 5,
+        n_workers = 4,
         output_key="",
     )
     

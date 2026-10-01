@@ -561,10 +561,10 @@ def main(server_ON=False, parallel_ON=False, mpi_ON=False,
     # Detection tuning. These are the knobs worth tweaking per run.
     # -------------------------------------------------------------------------
     OPTIONS = {
-        "region_temperature_threshold": -33,    # Initial pixel filter (°C).
-        "min_temperature_threshold": -65,       # Cluster must reach this min (°C).
-        "min_area_km2": 75e3,                   # Minimum cluster area.
-        "smooth_sigma": 20.0,                   # Gaussian smoothing radius (px).
+        "region_temperature_threshold": -40,    # Initial pixel filter (°C).
+        "min_temperature_threshold": -40,       # Cluster must reach this min (°C).
+        "min_area_km2": 2.5e3,                   # Minimum cluster area.
+        "smooth_sigma": 10.,                   # Gaussian smoothing radius (px).
         "delete_noCloud_file": True,            # Prune frames with no cluster.
         # Alternative parameter set kept for reference:
         # "region_temperature_threshold": -45,
