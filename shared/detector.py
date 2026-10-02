@@ -452,6 +452,75 @@ def edge_correction(sigma, sigma_ref=25.0, delta_ref=20.0):
     return delta_ref * float(sigma) / sigma_ref
 
 
+# =============================================================================
+# Máscaras de clusters (para filtrar dados de raios depois)
+# =============================================================================
+MASK_DIR = Path("grid_masks")   # pasta das máscaras (relativa ao diretório de execução)
+
+
+def mask_path_from_csv(csv_path, mask_dir=None):
+    """
+    Caminho da máscara: <mask_dir>/<nome_do_csv>_labels.npz
+    (um arquivo por timestamp; o nome do CSV já é único por timestamp).
+    mask_dir=None usa MASK_DIR ('grid_masks').
+    """
+    mask_dir = Path(mask_dir) if mask_dir is not None else MASK_DIR
+    return mask_dir / (Path(csv_path).stem + "_labels.npz")
+
+
+def save_labels_npz(path, labels, lats, lons, time_string="", **params):
+    """
+    Salva a máscara de labels de UM timestamp do GOES, com os eixos de lat/lon.
+
+    Chaves do arquivo:
+      labels      int16 (ny, nx)  0 = fora; k = cluster k (mesmo n_clusters do CSV)
+      lats, lons  float32 (1D)    centros das células da grade
+      time_string str             timestamp da imagem
+      + parâmetros da detecção passados em **params (ex.: t_threshold)
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        path,
+        labels=np.asarray(labels).astype(np.int16),
+        lats=np.asarray(lats, dtype=np.float32),
+        lons=np.asarray(lons, dtype=np.float32),
+        time_string=np.array(str(time_string)),
+        **{k: np.float32(v) for k, v in params.items()},
+    )
+
+
+def load_labels_npz(path):
+    """Lê um *_labels.npz e devolve (labels, lats, lons, time_string)."""
+    with np.load(Path(path), allow_pickle=False) as d:
+        return d["labels"], d["lats"], d["lons"], str(d["time_string"])
+
+
+def filtrar_raios(lat_r, lon_r, labels, lats, lons):
+    """
+    Marca quais raios caem dentro dos clusters de UMA máscara (um timestamp).
+
+    lat_r, lon_r : posições dos raios (graus)
+    labels, lats, lons : saída de load_labels_npz (grade regular, 1D)
+
+    Retorna (dentro, cluster_id):
+      dentro     bool (n,)   True se o raio está dentro de algum cluster
+      cluster_id int16 (n,)  número do cluster (0 = fora ou fora da grade)
+    """
+    lat_r = np.asarray(lat_r, dtype=float)
+    lon_r = np.asarray(lon_r, dtype=float)
+
+    dlat = (float(lats[-1]) - float(lats[0])) / (len(lats) - 1)   # funciona com lats crescente ou decrescente
+    dlon = (float(lons[-1]) - float(lons[0])) / (len(lons) - 1)
+    iy = np.rint((lat_r - float(lats[0])) / dlat).astype(int)
+    ix = np.rint((lon_r - float(lons[0])) / dlon).astype(int)
+
+    ok = (iy >= 0) & (iy < len(lats)) & (ix >= 0) & (ix < len(lons))   # raios fora da grade
+    cluster_id = np.zeros(lat_r.shape, dtype=np.int16)
+    cluster_id[ok] = labels[iy[ok], ix[ok]]
+    return cluster_id > 0, cluster_id
+
+
 def detect_clusters_area6(f, temp, OPTIONS, folders, plot_ON=True):
 # def detect_clusters_area6(f, temp, OPTIONS, folders, lats=None, lons=None, plot=True):
     t_threshold    = OPTIONS['region_temperature_threshold']
@@ -544,10 +613,21 @@ def detect_clusters_area6(f, temp, OPTIONS, folders, plot_ON=True):
         with folders['save_path'].open("w", encoding="utf-8", newline="") as fh:
             fh.write(header)
             fh.writelines(linhas)
-        
+
+        # --- máscara de labels (um arquivo por timestamp do GOES) ---
+        save_labels_npz(
+            mask_path_from_csv(folders['save_path'], folders.get('mask_dir')),
+            labels_filtered, lats, lons,
+            time_string=folders['time_string'],
+            t_threshold=t_threshold,
+            smooth_sigma=smooth_sigma,
+            min_area_km2=min_area_km2,
+            tmin_threshold=tmin_threshold,
+        )
+
     if plot_ON:
         temperature_plot_cartopy(temp, lats, lons, t_threshold, min_area_km2, props, labels_filtered, folders, tmin_threshold)
-        
+
     return labels_filtered, i_new>1, plot_ON
 
 

@@ -4,6 +4,7 @@
 download_goes_temporary/
 database_numpy/
 reports/
+grid_masks/
 figures/
 merged/
 maps/
