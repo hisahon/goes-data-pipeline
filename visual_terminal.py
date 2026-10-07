@@ -5,6 +5,8 @@ Created on Mon Oct 27 17:43:00 2025
 @author: hisas
 """
 
+#Gera todas as figuras faltantes, apenas de run
+
 from shared.visual import main
 import argparse
 
