@@ -187,66 +187,106 @@ def figure_path(file_path, OPTIONS):
 # =============================================================================
 # Parallel backend (multiprocessing.Pool) — primary execution path
 # =============================================================================
-def process_file_parallel(f, OPTIONS):
-    """
-    Multiprocessing-pool worker: processes one GOES frame.
+# def process_file_parallel(f, OPTIONS):
+#     """
+#     Multiprocessing-pool worker: processes one GOES frame.
 
-    Returns a short status string (logged by the caller). The possible outcomes:
-        1. Report already exists        -> skip.
-        2. NPZ fails to load            -> delete file and skip (likely corrupt).
-        3. Cold cluster found + plot    -> figure saved inside `dca`.
-        4. Cold cluster found, no plot  -> report only.
-        5. No cluster at all            -> optionally delete the NPZ.
-    """
+#     Returns a short status string (logged by the caller). The possible outcomes:
+#         1. Report already exists        -> skip.
+#         2. NPZ fails to load            -> delete file and skip (likely corrupt).
+#         3. Cold cluster found + plot    -> figure saved inside `dca`.
+#         4. Cold cluster found, no plot  -> report only.
+#         5. No cluster at all            -> optionally delete the NPZ.
+#     """
+#     try:
+#         folders = figure_path(f, OPTIONS)
+
+#         # (1) Skip frames that already have a report — idempotent re-runs.
+#         if folders['save_path'].exists():
+#             return f"{folders['time_string']} | Report exists [skipped] {f}"
+
+#         # (2) Load the .npz and run detection. A broken .npz is treated as
+#         #     unrecoverable and removed so later runs don't hit it again.
+#         try:
+#             temp, lats, lons = read_npz_goes(f)
+#             dca(f, temp, OPTIONS, folders, plot=True)
+#         except Exception:
+#             f.unlink(missing_ok=True)
+#             return f"{folders['time_string']} | Numpy file broken [deleted] {f}"
+
+#         # (3–5) Branch on the detection outcome.
+#         if cold_spot and plot_ON:
+#             return f"{folders['time_string']} | Clusters found [figure]  {folders['fig_path']}"
+#         elif cold_spot and not plot_ON:
+#             return f"{folders['time_string']} | Clusters found [no figure]"
+#         else:
+#             # No cluster: optionally prune the .npz to keep the database lean.
+#             if OPTIONS['delete_noCloud_file']:
+#                 f.unlink(missing_ok=True)
+#                 return f"{folders['time_string']} | No clusters found [deleted] {f}"
+#             return f"{folders['time_string']} | No clusters found [keeping] {f}"
+
+#     except Exception as e:
+#         # Last-resort catch: anything that escapes the inner blocks ends up here.
+#         # Soft-failing by design so one bad frame does not kill the entire pool.
+#         print(f"Error processing {f.name}: {e}")
+
+def process_file_parallel(f, OPTIONS):
+    """Pool worker: same job as the serial `process_file`. Never deletes files."""
     try:
         folders = figure_path(f, OPTIONS)
+        ts = folders["time_string"]
 
-        # (1) Skip frames that already have a report — idempotent re-runs.
-        if folders['save_path'].exists():
-            return f"{folders['time_string']} | Report exists [skipped] {f}"
+        if folders["fig_path"].exists():                 # already done -> skip
+            return f"{ts} | skipped"
 
-        # (2) Load the .npz and run detection. A broken .npz is treated as
-        #     unrecoverable and removed so later runs don't hit it again.
-        try:
-            temp, lats, lons = read_npz_goes(f)
-            dca(f, temp, OPTIONS, folders, plot=True)
-        except Exception:
-            f.unlink(missing_ok=True)
-            return f"{folders['time_string']} | Numpy file broken [deleted] {f}"
+        temp, lats, lons = read_npz_goes(f)
+        dca(f, temp, OPTIONS, folders, plot_ON=True)
+        return f"{ts} | ok"
 
-        # (3–5) Branch on the detection outcome.
-        if cold_spot and plot_ON:
-            return f"{folders['time_string']} | Clusters found [figure]  {folders['fig_path']}"
-        elif cold_spot and not plot_ON:
-            return f"{folders['time_string']} | Clusters found [no figure]"
-        else:
-            # No cluster: optionally prune the .npz to keep the database lean.
-            if OPTIONS['delete_noCloud_file']:
-                f.unlink(missing_ok=True)
-                return f"{folders['time_string']} | No clusters found [deleted] {f}"
-            return f"{folders['time_string']} | No clusters found [keeping] {f}"
+    except Exception as e:                               # returned, so the parent prints it
+        return f"{f.name} | ERROR {type(e).__name__}: {e}"
 
-    except Exception as e:
-        # Last-resort catch: anything that escapes the inner blocks ends up here.
-        # Soft-failing by design so one bad frame does not kill the entire pool.
-        print(f"Error processing {f.name}: {e}")
 
+
+# def process_goes_parallel(files, OPTIONS):
+#     """Fan out `process_file_parallel` across a multiprocessing Pool."""
+#     # Fall back to CPU-1 workers when the caller did not specify a count.
+#     n_workers = OPTIONS['n_workers'] or _auto_workers()
+#     print(f"Starting parallel processing with {n_workers} workers...")
+
+#     # imap_unordered prints results as they arrive (rather than waiting for the
+#     # original input order) and keeps all workers busy.
+#     with Pool(processes=n_workers) as pool:
+#         for msg in pool.imap_unordered(
+#             partial(process_file_parallel, OPTIONS=OPTIONS), files
+#         ):
+#             print(msg)
+
+#     print(f"All {len(files)} files processed.")
 
 def process_goes_parallel(files, OPTIONS):
     """Fan out `process_file_parallel` across a multiprocessing Pool."""
-    # Fall back to CPU-1 workers when the caller did not specify a count.
     n_workers = OPTIONS['n_workers'] or _auto_workers()
+    n = len(files)
+    w = len(str(n))
     print(f"Starting parallel processing with {n_workers} workers...")
 
-    # imap_unordered prints results as they arrive (rather than waiting for the
-    # original input order) and keeps all workers busy.
-    with Pool(processes=n_workers) as pool:
-        for msg in pool.imap_unordered(
-            partial(process_file_parallel, OPTIONS=OPTIONS), files
-        ):
-            print(msg)
+    counts = {"ok": 0, "skipped": 0, "ERROR": 0}
+    # maxtasksperchild=1: every frame runs in a brand-new process, so the OS
+    # frees ALL its memory before the next frame (slower start, no leaks).
+    # `imap` keeps the input (chronological) order, so the log reads in time order.
+    with Pool(processes=n_workers, maxtasksperchild=1) as pool:
+        for i, msg in enumerate(
+            pool.imap(partial(process_file_parallel, OPTIONS=OPTIONS), files), 1):
+            print(f"[{i:>{w}}/{n}] {msg}")
+            for k in counts:
+                if f"| {k}" in msg:
+                    counts[k] += 1
 
-    print(f"All {len(files)} files processed.")
+    print(f"Done: {counts['ok']} ok | {counts['skipped']} skipped | {counts['ERROR']} errors "
+          f"(of {n} files).")
+
 
 
 # =============================================================================
@@ -625,7 +665,7 @@ def main(server_ON=False, parallel_ON=False, mpi_ON=False,
         print(f"[INFO] Found {len(files)} files, {n_workers} workers.")
         print("--------------------------setup------------------------------------")
         # Confirmation gate — auto-skipped when stdin is not a TTY.
-        if ask_yes_no("Prosseguir com essas configurações? [s/N]: ", default=False):
+        if ask_yes_no("Prosseguir com essas configurações? [s/N]: ", default=True):
             process_goes_parallel(files, OPTIONS)
 
     else:
