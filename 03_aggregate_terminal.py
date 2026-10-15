@@ -1,40 +1,93 @@
 # -*- coding: utf-8 -*-
 """
-aggregator_terminal.py
-======================
+03_aggregate_terminal.py
+========================
 
-Wrapper CLI para o estágio de agregação e visualização exploratória.
-Fino, no estilo de ``visual_terminal.py`` e ``tracker_terminal.py``.
+Etapa 3 do pipeline (download -> detect -> **aggregate** -> track).
+Junta os relatórios por frame (``reports/YYYY/DDD/C13_YYYY-DDD_HHMM.txt``,
+um .txt por imagem) em tabelas, e gera figuras exploratórias.
+Wrapper fino sobre ``aggregator.py`` (que precisa estar na mesma pasta).
 
 Subcomandos
 -----------
+aggregate   (PADRÃO: um arquivo POR DIA)
+    Varre ``reports/YYYY/DDD/`` e grava, para cada dia que tenha células:
+        tracked-thunderstorms/YYYY/YYYY_DOY_DDMES_C13.parquet
+    ex.: 13/12/2023 (DOY 347) -> tracked-thunderstorms/2023/2023_347_13DEZ_C13.parquet
+    (MES em português: JAN FEV MAR ABR MAI JUN JUL AGO SET OUT NOV DEZ)
+    * dias já gerados são PULADOS (rodar de novo só faz o que falta);
+    * dias sem nenhuma célula detectada não geram arquivo;
+    * ``--single`` volta ao comportamento antigo: UM parquet com tudo.
+unique      reduz para uma célula por horário (a de maior área).
+plot-runs   PNG anual DOY x hora com sequências contínuas.
+plot-multi  overlay dos horários com mais de uma célula.
 
-* ``aggregate``  — varre ``reports/*.txt`` e gera o parquet agregado.
-* ``unique``     — reduz para um cluster por timestamp (maior área).
-* ``plot-runs``  — gera o PNG anual DOY × hora com runs contínuos.
-* ``plot-multi`` — gera o overlay de timestamps multicluster.
+Opções do ``aggregate``
+-----------------------
+--reports-dir DIR   raiz dos reports (contém YYYY/DDD/*.txt).
+                    Default: <root>/reports  (NÃO é a pasta do visual.py;
+                    no Windows passe D:/goes-data-pipeline/reports<chave>).
+--out-dir DIR       raiz de saída. Default: <pasta deste script>/tracked-thunderstorms.
+--year N            só este ano.            --doy N   só este dia do ano.
+--format parquet|csv   formato dos arquivos diários (default parquet).
+--keep-cols A B ..  só estas colunas (default: todas).
+--force             refaz mesmo se o arquivo já existir.
+--single            um único parquet (usa --output / -o em vez de --out-dir).
+--server            layout de pastas do servidor (<root> = home).
+-v / -vv            mais mensagens de log.
 
-Exemplos
---------
+<root> = D:/banco_dados/cptec (Windows) | ~ (--server) | ~/database/cptec (Linux).
 
-Pipeline padrão (roda os três primeiros estágios)::
+Como executar
+-------------
+Windows (Anaconda Prompt / PowerShell), a partir da pasta dos scripts::
 
-    python aggregator_terminal.py aggregate --server \\
-        --reports-dir reports_S \\
+    # tudo (todos os anos e dias):
+    python 03_aggregate_terminal.py aggregate --reports-dir D:/goes-data-pipeline/reports_xxx
+
+    # um dia (para testar primeiro):
+    python 03_aggregate_terminal.py aggregate --reports-dir D:/goes-data-pipeline/reports_xxx ^
+        --year 2023 --doy 347
+
+    # um ano, saída em outra pasta, só algumas colunas:
+    python 03_aggregate_terminal.py aggregate --reports-dir D:/goes-data-pipeline/reports_xxx ^
+        --year 2023 --out-dir D:/goes-data-pipeline/tracked-thunderstorms ^
+        --keep-cols datetime centroid_lat centroid_lon area_km2 temp_min_C temp_mean_C temp_std_C
+
+    # refazer um dia que já existe:
+    python 03_aggregate_terminal.py aggregate --reports-dir ... --year 2023 --doy 347 --force
+
+Servidor (Linux)::
+
+    python 03_aggregate_terminal.py --server aggregate --reports-dir reports_S
+
+Parquet único (para unique / plot-runs / plot-multi, que leem UM arquivo)::
+
+    python 03_aggregate_terminal.py aggregate --reports-dir ... --single \\
         --output merged/c13_2018-2025.parquet
+    python 03_aggregate_terminal.py unique \\
+        --input  merged/c13_2018-2025.parquet --output merged/c13_2018-2025u.parquet
+    python 03_aggregate_terminal.py plot-runs \\
+        --input  merged/c13_2018-2025u.parquet --out-dir results --min-hours 16 --gap-minutes 30
 
-    python aggregator_terminal.py unique \\
-        --input  merged/c13_2018-2025.parquet \\
-        --output merged/c13_2018-2025u.parquet
+Ler os arquivos diários em Python (Spyder)::
 
-    python aggregator_terminal.py plot-runs \\
-        --input  merged/c13_2018-2025u.parquet \\
-        --out-dir results --min-hours 16 --gap-minutes 30
+    from pathlib import Path
+    import pandas as pd
+    df = pd.concat(pd.read_parquet(f) for f in
+                   sorted(Path("D:/goes-data-pipeline/tracked-thunderstorms").rglob("*.parquet")))
+
+Observações
+-----------
+* Cada linha do .txt é uma célula; ``n_clusters`` é o índice da célula no frame.
+* ``datetime`` vem do nome do .txt (feito por ``reports2df``).
+* ``unique``, ``plot-runs`` e ``plot-multi`` ainda esperam UM parquet em ``--input``.
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import logging
 import os
 import sys
@@ -51,6 +104,9 @@ from aggregator import (
 )
 
 logger = logging.getLogger("aggregator")
+
+MESES = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN",
+         "JUL", "AGO", "SET", "OUT", "NOV", "DEZ"]
 
 
 # ---------------------------------------------------------------------------
@@ -69,13 +125,14 @@ def defining_folders(server: bool) -> dict[str, Path]:
         "reports": root / "reports",
         "merged": root / "merged",
         "figures": root / "figures_runs",
+        "daily": Path(__file__).resolve().parent / "tracked-thunderstorms",
     }
 
 
 # ---------------------------------------------------------------------------
 # Subcomandos
 # ---------------------------------------------------------------------------
-def cmd_aggregate(args: argparse.Namespace) -> int:
+def _aggregate_single(args: argparse.Namespace) -> int:
     folders = defining_folders(args.server)
     reports = Path(args.reports_dir) if args.reports_dir else folders["reports"]
     out = Path(args.output) if args.output else (
@@ -99,6 +156,55 @@ def cmd_aggregate(args: argparse.Namespace) -> int:
     df.to_parquet(out, index=False)
     logger.info("Salvo: %s (%d linhas)", out, len(df))
     return 0
+
+
+def _aggregate_daily(args: argparse.Namespace) -> int:
+    """Um arquivo por dia: reports/YYYY/DDD/*.txt -> <out>/YYYY/YYYY_DOY_DDMES_C13.<ext>."""
+    folders = defining_folders(args.server)
+    reports = Path(args.reports_dir) if args.reports_dir else folders["reports"]
+    out_root = Path(args.out_dir) if args.out_dir else folders["daily"]
+    ext = "csv" if args.format == "csv" else "parquet"
+
+    day_dirs = sorted(d for d in reports.glob("[0-9][0-9][0-9][0-9]/[0-9][0-9][0-9]")
+                      if d.is_dir())
+    if args.year is not None:
+        day_dirs = [d for d in day_dirs if int(d.parent.name) == args.year]
+    if args.doy is not None:
+        day_dirs = [d for d in day_dirs if int(d.name) == args.doy]
+    if not day_dirs:
+        logger.error("Nenhuma pasta YYYY/DDD em %s.", reports)
+        return 1
+
+    n_ok = n_skip = n_empty = 0
+    for d in day_dirs:
+        year, doy = d.parent.name, d.name
+        day = dt.date(int(year), 1, 1) + dt.timedelta(days=int(doy) - 1)
+        out = out_root / year / f"{year}_{doy}_{day:%d}{MESES[day.month - 1]}_C13.{ext}"
+        if out.exists() and not args.force:
+            n_skip += 1
+            continue
+        df = reports2df(d)
+        if df.empty:                      # dia sem nenhuma célula detectada
+            n_empty += 1
+            continue
+        if args.keep_cols:
+            df = df[[c for c in args.keep_cols if c in df.columns]]
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if ext == "csv":
+            df.to_csv(out, index=False)
+        else:
+            df.to_parquet(out, index=False)
+        n_ok += 1
+        print(f"{year}-{doy} | {len(df)} linhas -> {out.name}")
+
+    print(f"Done: {n_ok} gerados | {n_skip} já existiam | {n_empty} sem células "
+          f"(de {len(day_dirs)} dias) em {out_root}")
+    return 0
+
+
+def cmd_aggregate(args: argparse.Namespace) -> int:
+    """Padrão: um arquivo por dia. ``--single``: um único parquet."""
+    return _aggregate_single(args) if args.single else _aggregate_daily(args)
 
 
 def cmd_unique(args: argparse.Namespace) -> int:
@@ -172,6 +278,7 @@ def cmd_plot_multi(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
+        prog="03_aggregate_terminal.py",
         description="Agregação de reports + análises exploratórias DOY×hora.",
     )
     p.add_argument("--server", action="store_true",
@@ -183,17 +290,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     # -- aggregate --
     a = sub.add_parser("aggregate",
-                       help="Varre reports/*.txt e gera o parquet agregado.")
+                       help="Varre reports/*.txt e gera um parquet por dia "
+                            "(--single: um parquet único).")
     a.add_argument("--reports-dir", type=str,
                    help="Raiz da árvore de reports. Default: <root>/reports.")
+    a.add_argument("--single", action="store_true",
+                   help="Um único parquet com tudo (em vez de um por dia).")
+    a.add_argument("--out-dir", type=str,
+                   help="[por dia] Raiz de saída. Default: <pasta deste script>/tracked-thunderstorms.")
+    a.add_argument("--year", type=int, help="[por dia] Só este ano.")
+    a.add_argument("--doy", type=int, help="[por dia] Só este dia do ano.")
+    a.add_argument("--format", choices=["parquet", "csv"], default="parquet",
+                   help="[por dia] Formato dos arquivos. Default: parquet.")
     a.add_argument("--output", type=str,
-                   help="Parquet de saída. Default: merged/c13_aggregated.parquet")
+                   help="[--single] Parquet de saída. Default: merged/c13_aggregated.parquet")
     a.add_argument("-o", "--output_key", type=str, default="",
-                   help="Sufixo para o nome default do parquet.")
+                   help="[--single] Sufixo para o nome default do parquet.")
     a.add_argument("--keep-cols", nargs="*", default=None,
                    help="Colunas a preservar (default: todas).")
     a.add_argument("--force", action="store_true",
-                   help="Sobrescreve mesmo se o parquet já existir.")
+                   help="Refaz mesmo se o arquivo já existir.")
     a.set_defaults(func=cmd_aggregate)
 
     # -- unique --
