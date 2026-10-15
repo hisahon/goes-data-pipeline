@@ -165,7 +165,8 @@ def figure_path(file_path, OPTIONS):
     year = ts.strftime("%Y")
     doy = ts.timetuple().tm_yday        # Day-of-year (1–366), used as folder name.
     hhmm = ts.strftime("%H%M")
-    ts_title = ts.strftime("%j-%Y %H:%M")
+    # Plot-title format: "YYYY [DD/MM][DOY] HH:MM"  e.g. "2021 [15/10][288] 20:20"
+    ts_title = f"{ts:%Y} [{ts:%d/%m}][{doy:03d}] {ts:%H:%M}"
 
     fig_folder = OPTIONS["root_folder_fig"] / year / f"{doy:03d}"
     fig_name = f"C13_{year}-{doy:03d}_{hhmm}.png"
