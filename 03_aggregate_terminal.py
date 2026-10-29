@@ -2,12 +2,12 @@
 """
 03_aggregate_terminal.py
 ========================
-
+ 
 Etapa 3 do pipeline (download -> detect -> **aggregate** -> track).
 Junta os relatórios por frame (``reports/YYYY/DDD/C13_YYYY-DDD_HHMM.txt``,
 um .txt por imagem) em tabelas, e gera figuras exploratórias.
 Wrapper fino sobre ``aggregator.py`` (que precisa estar na mesma pasta).
-
+ 
 Subcomandos
 -----------
 aggregate   (PADRÃO: um arquivo POR DIA)
@@ -16,73 +16,119 @@ aggregate   (PADRÃO: um arquivo POR DIA)
     ex.: 13/12/2023 (DOY 347) -> tracked-thunderstorms/2023/2023_347_13DEZ_C13.parquet
     (MES em português: JAN FEV MAR ABR MAI JUN JUL AGO SET OUT NOV DEZ)
     * dias já gerados são PULADOS (rodar de novo só faz o que falta);
-    * dias sem nenhuma célula detectada não geram arquivo;
+    * dias sem nenhuma célula detectada não geram arquivo (e por isso são
+      relidos a cada execução; só custa o tempo de ler os .txt do dia);
     * ``--single`` volta ao comportamento antigo: UM parquet com tudo.
-unique      reduz para uma célula por horário (a de maior área).
-plot-runs   PNG anual DOY x hora com sequências contínuas.
-plot-multi  overlay dos horários com mais de uma célula.
-
+unique      reduz para uma célula por horário (a de maior ``--size-col``,
+            default ``area_km2``). Lê UM parquet (o gerado por ``--single``).
+plot-runs   PNG anual DOY x hora com sequências contínuas (um PNG por ano).
+            Lê UM parquet, normalmente o já reduzido por ``unique``.
+plot-multi  overlay dos horários com mais de uma célula. Lê UM parquet BRUTO
+            (antes do ``unique``, senão não há horário multicluster).
+ 
+Opções globais (vêm ANTES do subcomando)
+----------------------------------------
+--server            layout de pastas do servidor (<root> = home). Ignorada no
+                    Windows (lá o <root> é sempre D:/banco_dados/cptec).
+-v / -vv            log INFO / DEBUG. O padrão é WARNING: sem -v, mensagens como
+                    "Salvo: ..." do --single, unique e plot-* não aparecem.
+                    (o ``aggregate`` por dia imprime o progresso com print,
+                    independente de -v).
+ 
+    ex.: python 03_aggregate_terminal.py -v --server aggregate ...
+ 
 Opções do ``aggregate``
 -----------------------
 --reports-dir DIR   raiz dos reports (contém YYYY/DDD/*.txt).
                     Default: <root>/reports  (NÃO é a pasta do visual.py;
                     no Windows passe D:/goes-data-pipeline/reports<chave>).
+--keep-cols A B ..  só estas colunas (default: todas). Nomes inexistentes são
+                    ignorados em silêncio.
+--force             refaz mesmo se o arquivo já existir.
+ 
+  Modo por dia (padrão):
 --out-dir DIR       raiz de saída. Default: <pasta deste script>/tracked-thunderstorms.
 --year N            só este ano.            --doy N   só este dia do ano.
 --format parquet|csv   formato dos arquivos diários (default parquet).
---keep-cols A B ..  só estas colunas (default: todas).
---force             refaz mesmo se o arquivo já existir.
---single            um único parquet (usa --output / -o em vez de --out-dir).
---server            layout de pastas do servidor (<root> = home).
--v / -vv            mais mensagens de log.
-
+ 
+  Modo ``--single`` (um único parquet):
+--single            ativa o modo; ``--out-dir/--year/--doy/--format`` NÃO valem.
+--output FILE       parquet de saída. Default: <root>/merged/c13_aggregated<KEY>.parquet
+-o, --output_key KEY   sufixo KEY do nome default (NÃO é o caminho de saída;
+                    para escolher o arquivo use --output).
+ 
+Opções dos demais subcomandos
+-----------------------------
+unique      --input FILE (default <root>/merged/c13_aggregated.parquet)
+            --output FILE (default: <input>u.parquet, i.e. "u" colado ao nome)
+            --size-col COL (default area_km2)       --force
+plot-runs   --input FILE (obrigatório)              --out-dir DIR (default <root>/figures_runs)
+            --min-hours H (16)    --gap-minutes M (30)
+            --area-label TXT ("Area > 200k km²")    --prefix P (doy_hour_runs)
+            --palette CMAP (tab10) --n-colors N (10) --dpi N (300)
+plot-multi  --input FILE (obrigatório; parquet bruto)
+            --output PNG (default <root>/figures_runs/doy_hour_multicluster.png)
+            --dpi N (150)
+ 
 <root> = D:/banco_dados/cptec (Windows) | ~ (--server) | ~/database/cptec (Linux).
-
+Código de saída: 0 = ok; 1 = nenhum relatório/pasta YYYY/DDD encontrado.
+ 
 Como executar
 -------------
-Windows (Anaconda Prompt / PowerShell), a partir da pasta dos scripts::
-
+Windows (Anaconda Prompt = cmd), a partir da pasta dos scripts.
+(Os exemplos usam ``^`` como continuação de linha, que só vale no cmd;
+ no PowerShell use o acento grave ` no lugar, ou escreva tudo em uma linha.)::
+ 
     # tudo (todos os anos e dias):
     python 03_aggregate_terminal.py aggregate --reports-dir D:/goes-data-pipeline/reports_xxx
-
+ 
     # um dia (para testar primeiro):
     python 03_aggregate_terminal.py aggregate --reports-dir D:/goes-data-pipeline/reports_xxx ^
         --year 2023 --doy 347
-
+ 
     # um ano, saída em outra pasta, só algumas colunas:
     python 03_aggregate_terminal.py aggregate --reports-dir D:/goes-data-pipeline/reports_xxx ^
         --year 2023 --out-dir D:/goes-data-pipeline/tracked-thunderstorms ^
         --keep-cols datetime centroid_lat centroid_lon area_km2 temp_min_C temp_mean_C temp_std_C
-
+ 
     # refazer um dia que já existe:
     python 03_aggregate_terminal.py aggregate --reports-dir ... --year 2023 --doy 347 --force
-
+ 
 Servidor (Linux)::
-
+ 
     python 03_aggregate_terminal.py --server aggregate --reports-dir reports_S
-
+ 
 Parquet único (para unique / plot-runs / plot-multi, que leem UM arquivo)::
-
+ 
     python 03_aggregate_terminal.py aggregate --reports-dir ... --single \\
         --output merged/c13_2018-2025.parquet
     python 03_aggregate_terminal.py unique \\
         --input  merged/c13_2018-2025.parquet --output merged/c13_2018-2025u.parquet
     python 03_aggregate_terminal.py plot-runs \\
         --input  merged/c13_2018-2025u.parquet --out-dir results --min-hours 16 --gap-minutes 30
-
+    python 03_aggregate_terminal.py plot-multi \\
+        --input  merged/c13_2018-2025.parquet --output results/doy_hour_multicluster.png
+ 
+    (plot-multi usa o parquet BRUTO, sem o "u"; plot-runs usa o reduzido.)
+ 
 Ler os arquivos diários em Python (Spyder)::
-
+ 
     from pathlib import Path
     import pandas as pd
     df = pd.concat(pd.read_parquet(f) for f in
                    sorted(Path("D:/goes-data-pipeline/tracked-thunderstorms").rglob("*.parquet")))
-
+    # se gerou com --format csv: rglob("*.csv") e pd.read_csv(f, parse_dates=["datetime"])
+ 
 Observações
 -----------
 * Cada linha do .txt é uma célula; ``n_clusters`` é o índice da célula no frame.
 * ``datetime`` vem do nome do .txt (feito por ``reports2df``).
-* ``unique``, ``plot-runs`` e ``plot-multi`` ainda esperam UM parquet em ``--input``.
+* ``unique``, ``plot-runs`` e ``plot-multi`` ainda esperam UM parquet em ``--input``:
+  não leem a pasta de arquivos diários. Para usá-los, gere antes com ``--single``.
+* No modo por dia o nome do arquivo (``YYYY_DOY_DDMES_C13``) é montado a partir
+  das pastas ``YYYY/DDD`` dos reports; pastas fora desse padrão são ignoradas.
 """
+
 
 from __future__ import annotations
 
@@ -95,7 +141,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from aggregator import (
+from shared.aggregator import (
     reports2df,
     make_unique_by_time,
     filter_continuous_runs,
