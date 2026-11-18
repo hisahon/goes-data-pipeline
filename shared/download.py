@@ -17,10 +17,12 @@ Created on Wed Oct 22 17:32:47 2025
 
 import os
 import re
+import shutil
 from pathlib import Path
 
 import numpy as np
 import requests
+import urllib3
 from requests.adapters import HTTPAdapter, Retry
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
@@ -69,9 +71,17 @@ def build_month_url(year: int, month: int, channel: int) -> str:
 # =============================================================================
 # HTTP session (one per process, reused for all requests)
 # =============================================================================
-def _build_session() -> requests.Session:
-    """Create a requests Session with retry/backoff for transient failures."""
+def _build_session(verify: bool = True) -> requests.Session:
+    """
+    Create a requests Session with retry/backoff for transient failures.
+
+    verify=False disables TLS certificate verification (flag --insecure). Use
+    only as a temporary workaround, e.g. when the CPTEC certificate expired.
+    """
     s = requests.Session()
+    s.verify = verify
+    if not verify:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     s.mount(
         "https://",
         HTTPAdapter(
@@ -91,10 +101,10 @@ def _build_session() -> requests.Session:
 _SESS: requests.Session | None = None
 
 
-def _init_worker() -> None:
+def _init_worker(verify: bool = True) -> None:
     """ProcessPoolExecutor initializer: create one Session per worker."""
     global _SESS
-    _SESS = _build_session()
+    _SESS = _build_session(verify)
 
 
 def _get_sess() -> requests.Session:
@@ -124,7 +134,7 @@ def _normalize_days(year: int, month: int, days):
 def _list_nc_files(sess: requests.Session, url: str, timeout: float):
     """Scrape a CPTEC directory index and return all .nc filenames linked."""
     try:
-        r = sess.get(url, timeout=timeout)
+        r = sess.get(url, timeout=timeout, verify=sess.verify)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
         return [
@@ -198,10 +208,12 @@ def _worker_job(item: dict):
     extent    = item["extent"]
     timeout   = float(item["timeout"])
     chunk_mb  = int(item.get("chunk_mb", 8))  # Larger chunks reduce overhead.
+    keep_nc   = bool(item.get("keep_nc", False))
 
     # Race-safe double-check: another worker may have just finished this file.
     if npz_path.exists() and npz_path.stat().st_size > 0:
-        return ("skipped", npz_path.name, "already exists")
+        if not keep_nc or (Path(item["raw_dir"]) / Path(url).name).exists():
+            return ("skipped", npz_path.name, "already exists")
 
     sess = _get_sess()
     CHUNK = max(1, chunk_mb) * 1024 * 1024
@@ -213,7 +225,8 @@ def _worker_job(item: dict):
     try:
         # --- Download the .nc stream to a temporary .part file ---
         t_net0 = perf_counter()
-        with sess.get(url, stream=True, timeout=timeout) as r:
+        with sess.get(url, stream=True, timeout=timeout,
+                      verify=sess.verify) as r:
             r.raise_for_status()
             with open(tmp_part, "wb") as f:
                 for chunk in r.iter_content(CHUNK):
@@ -243,13 +256,22 @@ def _worker_job(item: dict):
         status = ("err", Path(url).name, str(e))
 
     finally:
-        # Best-effort cleanup of the temporary raw file(s).
-        for p in (tmp_part, temp_nc):
-            try:
-                if p.exists():
-                    p.unlink(missing_ok=True)
-            except Exception:
-                pass
+        # Best-effort cleanup. With keep_nc the raw .nc of a successful job is
+        # moved to the permanent raw folder instead of being deleted.
+        try:
+            tmp_part.unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            if temp_nc.exists():
+                if keep_nc and status[0] == "ok":
+                    raw_dir = Path(item["raw_dir"])
+                    raw_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(temp_nc), str(raw_dir / temp_nc.name))
+                else:
+                    temp_nc.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     return status
 
@@ -267,12 +289,18 @@ def download_goes_multiproc(
     timeout: float = 30.0,
     max_workers: int | None = None,
     chunk_mb: int = 8,  # 4–8 MB is a sweet spot.
+    keep_nc: bool = False,
+    insecure: bool = False,
 ):
     """
     Orchestrate a parallel download for one year / channel.
 
     The satellite path (GOES-16 vs GOES-19) is selected automatically for each
     month via `build_month_url`.
+
+    If `keep_nc` is True, the original (uncropped) .nc files are kept under
+    folders["folder_raw_goes"]/YYYY/MM instead of being deleted. Files whose
+    .npz already exists are still downloaded when their .nc is missing there.
     """
     if not (1 <= channel <= 16):
         raise ValueError("Channel deve estar entre 1 e 16.")
@@ -281,7 +309,7 @@ def download_goes_multiproc(
     max_workers = effective_workers(max_workers)
 
     # Session used only by the controller for directory listings.
-    sess = _build_session()
+    sess = _build_session(verify=not insecure)
 
     # Root for the raw .nc temporary files.
     tmp_root = folders["folder_temporary_goes"]
@@ -310,9 +338,13 @@ def download_goes_multiproc(
             url     = urljoin(month_url, name)
             temp_nc = tmp_root / name
             npz_out = npz_path_from_nc(name, folders["folder_numpy_database"])
+            raw_dir = folders["folder_raw_goes"] / f"{year:04d}" / f"{m:02d}"
 
-            # Skip if the destination .npz already exists and is non-empty.
-            if npz_out.exists() and npz_out.stat().st_size > 0:
+            # Skip if the destination .npz already exists and is non-empty
+            # (and, when keeping originals, the raw .nc is already stored too).
+            npz_done = npz_out.exists() and npz_out.stat().st_size > 0
+            nc_done = (not keep_nc) or (raw_dir / name).exists()
+            if npz_done and nc_done:
                 pre_skipped += 1
                 continue
 
@@ -323,6 +355,8 @@ def download_goes_multiproc(
                 extent=extent,
                 timeout=timeout,
                 chunk_mb=chunk_mb,
+                keep_nc=keep_nc,
+                raw_dir=str(raw_dir),
             ))
 
     if not tasks:
@@ -344,7 +378,9 @@ def download_goes_multiproc(
     last_label = "—"
 
     with ProcessPoolExecutor(
-        max_workers=max_workers, initializer=_init_worker
+        max_workers=max_workers,
+        initializer=_init_worker,
+        initargs=(not insecure,),
     ) as ex:
         # chunksize 2–8 keeps workers "warm" without starving the scheduler.
         results = ex.map(_worker_job, tasks, chunksize=2)
@@ -385,7 +421,8 @@ def download_goes_multiproc(
 # Settings summary + confirmation prompt
 # =============================================================================
 def print_settings_and_confirm(
-    channel, year, months, days, extent, folders, timeout, req_workers
+    channel, year, months, days, extent, folders, timeout, req_workers,
+    keep_nc: bool = False, insecure: bool = False,
 ) -> bool:
     """Pretty-print the run settings and ask the user to confirm."""
     months_str  = "TODOS" if months is None else " ".join(map(str, months))
@@ -411,7 +448,13 @@ def print_settings_and_confirm(
     print(f"Recorte (extent):      {extent_str}")
     print(f"Pasta numpy (folder):  {folder_root}")
     print(f"Pasta temp (folder):   {folder_temp}")
+    if keep_nc:
+        print(f"Manter .nc originais:  SIM -> {folders['folder_raw_goes']}")
+    else:
+        print("Manter .nc originais:  NÃO")
     print(f"Timeout (s):           {timeout}")
+    if insecure:
+        print("Verificação SSL:       DESATIVADA (--insecure)")
     print(f"Workers (requested):   {req_label}")
     print(f"Workers (effective):   {eff_workers}  (capped to CPU-1)")
     print("=========================\n")
@@ -434,21 +477,25 @@ def defining_folders(server_ON: bool) -> dict:
         # Windows workstation.
         FOLDER_ROOT = Path("database_numpy")
         FOLDER_GOES_TEMPORARY = Path("goes_temporary_raw")
+        FOLDER_GOES_RAW = Path("database_goes_raw")
     elif os.name == "posix":
         if server_ON:
             # Remote/headless server: write under $HOME.
             FOLDER_ROOT = Path("~/database_numpy").expanduser()
             FOLDER_GOES_TEMPORARY = Path("~/download_goes_temporary").expanduser()
+            FOLDER_GOES_RAW = Path("~/database_goes_raw").expanduser()
         else:
             # Local POSIX workstation (sshfs-mounted CPTEC layout).
             FOLDER_ROOT = Path("~/database/cptec/database_numpy").expanduser()
             FOLDER_GOES_TEMPORARY = Path("~/download_goes_temporary").expanduser()
+            FOLDER_GOES_RAW = Path("~/database/cptec/database_goes_raw").expanduser()
     else:
         raise RuntimeError(f"Unsupported OS: {os.name}")
 
     return {
         "folder_numpy_database": FOLDER_ROOT,
         "folder_temporary_goes": FOLDER_GOES_TEMPORARY,
+        "folder_raw_goes": FOLDER_GOES_RAW,
     }
 
 
@@ -469,11 +516,14 @@ def main_manual():
     timeout     = 30.0
     req_workers = 16     # None => auto; higher values are capped at CPU-1.
     server_ON   = True
+    keep_nc     = False  # True => guarda os .nc originais em folder_raw_goes.
+    insecure    = False  # True => NÃO verifica o certificado SSL (temporário).
 
     folders = defining_folders(server_ON)
 
     if not print_settings_and_confirm(
-        channel, year, months, days, extent, folders, timeout, req_workers
+        channel, year, months, days, extent, folders, timeout, req_workers,
+        keep_nc=keep_nc, insecure=insecure,
     ):
         print("Cancelado pelo usuário.")
         return
@@ -489,6 +539,8 @@ def main_manual():
         extent=extent,
         timeout=timeout,
         max_workers=max_workers,
+        keep_nc=keep_nc,
+        insecure=insecure,
     )
 
     print("\nResumo final:")
@@ -517,6 +569,12 @@ def main_terminal():
                         help="Parallel workers (capped to CPU-1; default: auto)")
     parser.add_argument("--server", action="store_true",
                         help="Use the server-side folder layout.")
+    parser.add_argument("--keep-nc", action="store_true",
+                        help="Keep the original (uncropped) .nc files in "
+                             "folder_raw_goes/YYYY/MM instead of deleting them.")
+    parser.add_argument("--insecure", action="store_true",
+                        help="Disable TLS certificate verification (use only "
+                             "while the CPTEC certificate is expired).")
     args = parser.parse_args()
 
     # Project defaults — edit here if a different crop is needed.
@@ -535,6 +593,8 @@ def main_terminal():
         folders=folders,
         timeout=args.timeout,
         req_workers=req_workers,
+        keep_nc=args.keep_nc,
+        insecure=args.insecure,
     ):
         print("Cancelado pelo usuário.")
         return
@@ -550,6 +610,8 @@ def main_terminal():
         extent=extent,
         timeout=args.timeout,
         max_workers=max_workers,
+        keep_nc=args.keep_nc,
+        insecure=args.insecure,
     )
 
     print("\nResumo final:")
@@ -571,6 +633,11 @@ if __name__ == "__main__":
 #    and GOES-19 from 2025-04 onward. Adjust `_SATELLITE_CUTOFF_YYYYMM`
 #    above if CPTEC changes the cutoff.
 # 3) Regional cropping happens inside this pipeline — see `extent`.
+#
+# 4) --keep-nc (ou keep_nc=True no main_manual) guarda os .nc originais em
+#    folder_raw_goes/YYYY/MM. Sem a flag, o .nc é apagado após a conversão.
+# 5) --insecure desativa a verificação do certificado SSL. Use apenas enquanto
+#    o certificado do ftp.cptec.inpe.br estiver expirado; remova depois.
 #
 # --- Terminal examples ---
 # sshfs hisashi@150.163.46.4:/home/hisashi/cptec_codes ~/cptec_codes \
