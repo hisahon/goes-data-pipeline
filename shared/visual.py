@@ -134,6 +134,39 @@ def list_files_fast(root_folder: Union[str, Path],
     return out
 
 
+def collect_files(root_folder, extensions, fast=False,
+                  year=None, months=None, days=None):
+    """
+    List the frames to process.
+
+    With year=None, returns every file under `root_folder` (old behaviour).
+    With `year`, only the folders root/YYYY/MM are scanned (all 12 months when
+    `months` is None) and, when `days` is given, only frames of those days of
+    the month are kept. Much faster than walking the whole database.
+    """
+    lister = list_files_fast if fast else list_files
+    root_folder = Path(root_folder)
+    if year is None:
+        return lister(root_folder, extensions=extensions)
+
+    found = []
+    for m in (months or range(1, 13)):
+        found += lister(root_folder / f"{int(year):04d}" / f"{int(m):02d}",
+                        extensions=extensions)
+
+    if days is not None:
+        wanted = {int(d) for d in days}
+        kept = []
+        for f in found:
+            mt = re.search(r"_(\d{8})(\d{4})", f.name)   # _YYYYMMDDHHMM
+            if mt and int(mt.group(1)[6:8]) in wanted:
+                kept.append(f)
+        found = kept
+
+    found.sort(key=lambda p: p.name)
+    return found
+
+
 # =============================================================================
 # Path derivation
 # =============================================================================
@@ -182,6 +215,16 @@ def figure_path(file_path, OPTIONS):
         "save_path": save_path,
         "time_string": ts_title,
     }
+
+
+def is_done(folders, OPTIONS):
+    """
+    A frame counts as already processed when its output exists: the figure
+    if plotting is on, otherwise the per-frame report (.txt). Without this,
+    plot_ON=False would make every re-run reprocess all frames.
+    """
+    key = "fig_path" if OPTIONS.get("plot_ON", True) else "save_path"
+    return folders[key].exists()
 
 
 # =============================================================================
@@ -237,11 +280,11 @@ def process_file_parallel(f, OPTIONS):
         folders = figure_path(f, OPTIONS)
         ts = folders["time_string"]
 
-        if folders["fig_path"].exists():                 # already done -> skip
+        if is_done(folders, OPTIONS):                    # already done -> skip
             return f"{ts} | skipped"
 
         temp, lats, lons = read_npz_goes(f)
-        dca(f, temp, OPTIONS, folders, plot_ON=True)
+        dca(f, temp, OPTIONS, folders, plot_ON=OPTIONS["plot_ON"])
         return f"{ts} | ok"
 
     except Exception as e:                               # returned, so the parent prints it
@@ -492,7 +535,7 @@ def process_goes_mpi(files, options):
 def process_file(f, OPTIONS, folders):
     """Single-file worker used by the serial path."""
     temp, lats, lons = read_npz_goes(f)
-    dca(f, temp, OPTIONS, folders, plot_ON=True)
+    dca(f, temp, OPTIONS, folders, plot_ON=OPTIONS["plot_ON"])
 
     # if cold_spot:
     #     ...
@@ -505,8 +548,8 @@ def process_goes_folder(files, OPTIONS):
     for i, f in enumerate(files):
         folders = figure_path(f, OPTIONS)
 
-        # Skip anything whose figure is already present.
-        if folders["fig_path"].exists():
+        # Skip anything already processed (figure, or report if plot is off).
+        if is_done(folders, OPTIONS):
             print(f"Skipping (figure exists): {f.name}")
             continue
 
@@ -557,7 +600,8 @@ def ask_yes_no(prompt="Prosseguir? [s/N]: ", default=False):
 # Main entry point
 # =============================================================================
 def main(server_ON=False, parallel_ON=False, mpi_ON=False,
-         n_workers=None, output_key=""):
+         n_workers=None, output_key="", plot_ON=True,
+         delete_noCloud_file=False, year=None, months=None, days=None):
     """
     Set up paths + options, then dispatch to the chosen execution backend.
 
@@ -569,7 +613,16 @@ def main(server_ON=False, parallel_ON=False, mpi_ON=False,
     n_workers   : worker count for the parallel backend (None = auto).
     output_key  : suffix appended to the figures/reports folder names,
                   useful when running several parameter sets side by side.
+    plot_ON     : False => run detection and write reports, but draw NO
+                  figures (the isoline/cluster plot is skipped).
+    delete_noCloud_file : True => frames without a cold cluster are pruned
+                  (their .npz deleted). Default False keeps all .npz data.
+    year, months, days : restrict processing to this period (e.g. year=2026,
+                  months=[11], days=[17]). year=None processes every frame.
     """
+    if year is None and (months or days):
+        raise ValueError("`months`/`days` exigem `year`.")
+
     # -------------------------------------------------------------------------
     # Folder layout per platform / environment.
     # -------------------------------------------------------------------------
@@ -606,7 +659,8 @@ def main(server_ON=False, parallel_ON=False, mpi_ON=False,
         "min_temperature_threshold": -30,       # Cluster must reach this min (°C).
         "min_area_km2": 1.e3,                   # Minimum cluster area.
         "smooth_sigma": 10.,                   # Gaussian smoothing radius (px).
-        "delete_noCloud_file": True,            # Prune frames with no cluster.
+        "delete_noCloud_file": delete_noCloud_file,  # Prune frames with no cluster.
+        "plot_ON": plot_ON,                     # False => no figures.
         # Alternative parameter set kept for reference:
         # "region_temperature_threshold": -45,
         # "min_temperature_threshold": -70,
@@ -630,6 +684,10 @@ def main(server_ON=False, parallel_ON=False, mpi_ON=False,
     print(f"[INFO] ROOT_FOLDER_FIG: {ROOT_FOLDER_FIG}")
     print(f"[INFO] ROOT_FOLDER_REPORTs: {ROOT_FOLDER_REPORTs}")
     print(f"[INFO] MPI={mpi_ON} | PARALLEL={parallel_ON} | SERVER={server_ON}")
+    period = ("TODOS" if year is None else
+              f"{year} meses={months or 'todos'} dias={days or 'todos'}")
+    print(f"[INFO] Período: {period}")
+    print(f"[INFO] Plot figures: {OPTIONS['plot_ON']}")
     print(f"[INFO] Deleting no Cluster Found Files: {OPTIONS['delete_noCloud_file']}")
     print(f"[INFO] Region Tmax: {OPTIONS['region_temperature_threshold']} C, "
           f"Cluster Tmax: {OPTIONS['min_temperature_threshold']} C")
@@ -649,7 +707,8 @@ def main(server_ON=False, parallel_ON=False, mpi_ON=False,
 
         # Only rank 0 walks the filesystem; workers get the list via bcast.
         if rank == 0:
-            files = list_files(ROOT_FOLDER, extensions=EXTENSIONS)
+            files = collect_files(ROOT_FOLDER, EXTENSIONS,
+                                  year=year, months=months, days=days)
             print(f"{len(files)} arquivos encontrados.")
         else:
             files = None
@@ -657,10 +716,8 @@ def main(server_ON=False, parallel_ON=False, mpi_ON=False,
 
     elif parallel_ON:
         # Use the fast scanner when on a remote mount; rglob otherwise.
-        if server_ON:
-            files = list_files_fast(ROOT_FOLDER, extensions=EXTENSIONS)
-        else:
-            files = list_files(ROOT_FOLDER, extensions=EXTENSIONS)
+        files = collect_files(ROOT_FOLDER, EXTENSIONS, fast=server_ON,
+                              year=year, months=months, days=days)
 
         print(f"[INFO] Found {len(files)} files, {n_workers} workers.")
         print("--------------------------setup------------------------------------")
@@ -669,7 +726,8 @@ def main(server_ON=False, parallel_ON=False, mpi_ON=False,
             process_goes_parallel(files, OPTIONS)
 
     else:
-        files = list_files(ROOT_FOLDER, extensions=EXTENSIONS)
+        files = collect_files(ROOT_FOLDER, EXTENSIONS,
+                              year=year, months=months, days=days)
         print(f"{len(files)} arquivos encontrados.")
         process_goes_folder(files, OPTIONS)
 
